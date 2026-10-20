@@ -927,11 +927,27 @@ class RetentionContracts(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "native callback ABI required")
     def test_shell_callbacks_veto_wrong_item_and_disposition_without_mutation(self):
-        for mode in ("recycle", "permanent", "wrong-item", "bypass", "handler-error"):
+        self.target.mkdir(parents=True)
+        metadata = RETENTION._module("inventory")._new_metadata_reader().read(self.target)
+        manifest = {"entries": [{
+            "relative": ".", "identity": list(metadata.identity),
+            "directory": metadata.directory, "allocated_bytes": metadata.allocated_bytes,
+            "bytes": metadata.logical_bytes, "modified": metadata.last_write,
+        }], "allocated_bytes": 0, "root_identity": list(metadata.identity)}
+        for mode in ("recycle", "permanent", "wrong-item", "bypass", "handler-error", "purge-alias"):
             shell = RETENTION.WindowsRecycleBin.__new__(RETENTION.WindowsRecycleBin)
             operation_state = {"sink": None, "flags": 0}
             shell._item = lambda name: ctypes.c_void_p(2)
-            shell._name = lambda pointer, format, mode=mode: "unexpected" if mode == "wrong-item" else str(self.target) if pointer == 2 or getattr(pointer, "value", None) == 2 else "created"
+            def shell_name(pointer, format, mode=mode):
+                selected = pointer == 2 or getattr(pointer, "value", None) == 2
+                if not selected:
+                    return "created"
+                if mode == "wrong-item":
+                    return "unexpected"
+                if mode == "purge-alias":
+                    return "C:\\deleted-original" if format == 0x80058000 else str(self.target)
+                return str(self.target)
+            shell._name = shell_name
             shell.ole = type("Ole", (), {"CoCreateInstance": lambda _, clsid, outer, context, iid, output: self._set_pointer(output, 1)})()
             def invoke(pointer, index, args, *values, mode=mode, operation_state=operation_state, **kwargs):
                 if index == 5:
@@ -941,7 +957,7 @@ class RetentionContracts(unittest.TestCase):
                 elif index == 21:
                     sink = operation_state["sink"]
                     table = ctypes.cast(sink, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
-                    flags = 0 if mode == "permanent" else 0x80
+                    flags = 0 if mode in {"permanent", "purge-alias"} else 0x80
                     pre = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p)(table[11])
                     pre_result = pre(sink, flags, 2)
                     if pre_result < 0:
@@ -951,14 +967,20 @@ class RetentionContracts(unittest.TestCase):
                 elif index == 22:
                     ctypes.cast(values[0], ctypes.POINTER(ctypes.c_int))[0] = 0
                 return 0
-            manifest = {"entries": [], "allocated_bytes": 0, "root_identity": ["v", "owned"]}
-            scan = RuntimeError("callback observation failed") if mode == "handler-error" else manifest
-            with patch.object(RETENTION, "_call", side_effect=invoke), patch.object(RETENTION, "tree_manifest", side_effect=scan if isinstance(scan, RuntimeError) else None, return_value=manifest):
+            inventory = RETENTION._module("inventory")
+            reader = inventory._new_metadata_reader()
+            scan = OSError("callback observation failed") if mode == "handler-error" else None
+            with patch.object(RETENTION, "_call", side_effect=invoke), \
+                 patch.object(inventory, "_new_metadata_reader", return_value=reader), \
+                 patch.object(reader, "read", side_effect=scan, return_value=metadata):
                 if mode in {"wrong-item", "bypass", "handler-error"}:
                     with self.assertLogs(RETENTION._LOGGER, level="ERROR"), self.assertRaises(OSError):
                         shell._operate(str(self.target), recycle=True, expected_path=str(self.target), expected_tree=manifest)
                 else:
-                    result = shell._operate(str(self.target), recycle=mode == "recycle", expected_path=str(self.target), expected_tree=manifest)
+                    result = shell._operate(
+                        str(self.target), recycle=mode == "recycle", expected_path=str(self.target),
+                        expected_alias="C:\\deleted-original" if mode == "purge-alias" else None,
+                        expected_tree=manifest)
                     self.assertEqual(len(result["pre"]), 1)
                     self.assertEqual(len(result["post"]), 1)
                     self.assertEqual(bool(operation_state["flags"] & 0x00080000), mode == "recycle")

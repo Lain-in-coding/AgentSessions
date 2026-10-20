@@ -1057,13 +1057,15 @@ class WindowsRecycleBin:
         return {"quota_bytes": cap * 1024 * 1024, "existing_logical_bytes": info.bytes,
                 "required_bytes_with_margin": required, "volume": volume.value, "no_eviction_admitted": True}
 
-    def _operate(self, parsing_name: str, *, recycle: bool, expected_path: str, expected_tree: dict | None = None) -> dict:
+    def _operate(self, parsing_name: str, *, recycle: bool, expected_path: str,
+                 expected_alias: str | None = None, expected_tree: dict | None = None) -> dict:
         operation = ctypes.c_void_p()
         _hr(self.ole.CoCreateInstance(ctypes.byref(_GUID("3ad05575-8857-4850-9277-11b85bdb8e09")), None, 1,
                                       ctypes.byref(_GUID("947aab5f-0a5c-4c13-b4d6-4bf7836fc9f8")), ctypes.byref(operation)))
         item = self._item(parsing_name)
         callbacks: list[Any] = []
         state: dict[str, list[Any]] = {"pre": [], "post": [], "errors": []}
+        seen_relatives: set[str] = set()
         iid_sink = uuid.UUID("04b0f1a7-9490-44bc-96e1-4296a31252e2").bytes_le
         iid_unknown = uuid.UUID("00000000-0000-0000-c000-000000000046").bytes_le
         def callback(args, handler):
@@ -1087,15 +1089,59 @@ class WindowsRecycleBin:
             return 0
         def pre(this, flags, source):
             physical = self._name(source, 0x80058000)
-            _need(os.path.normcase(physical) == os.path.normcase(expected_path), "Shell selected unexpected item")
+            selected_parsing_name = self._name(source, 0x80028000)
+            roots = [Path(expected_path)]
+            if expected_alias is not None:
+                roots.append(Path(expected_alias))
+
+            def relative(path: Path) -> str | None:
+                for root in roots:
+                    path_key, root_key = os.path.normcase(str(path)), os.path.normcase(str(root))
+                    if path_key == root_key:
+                        return "."
+                    prefix = root_key.rstrip("\\/") + os.sep
+                    if path_key.startswith(prefix):
+                        return path.relative_to(root).as_posix()
+                return None
+
+            physical_relative = relative(Path(physical))
+            parsing_relative = relative(Path(selected_parsing_name))
+            _need(physical_relative is not None and physical_relative == parsing_relative,
+                  f"Shell selected unexpected item: physical={physical!r} "
+                  f"parsing={selected_parsing_name!r} expected={[str(root) for root in roots]!r}")
             if expected_tree is not None:
-                _need(_same_tree(expected_tree, tree_manifest(Path(physical))), "Shell source identity/tree changed before delete")
+                observed_path = Path(selected_parsing_name)
+                if not observed_path.exists():
+                    # For a recycle-bin item IFileOperation's display path is
+                    # the deleted original, while the parsing name remains the
+                    # exact $R storage entry. The outer operation was created
+                    # from that entry, so reverify its tree through the pinned
+                    # storage path when the callback exposes only the display.
+                    observed_path = Path(expected_path)
+                matches = [entry for entry in expected_tree["entries"]
+                           if entry.get("relative") == parsing_relative]
+                _need(len(matches) == 1 and parsing_relative not in seen_relatives,
+                      "Shell source entry is outside or duplicated in sealed tree")
+                expected_entry = matches[0]
+                meta = _module("inventory")._new_metadata_reader().read(observed_path)
+                _need(list(meta.identity) == expected_entry.get("identity")
+                      and meta.directory is expected_entry.get("directory")
+                      and meta.allocated_bytes == expected_entry.get("allocated_bytes")
+                      and meta.logical_bytes == expected_entry.get("bytes")
+                      and meta.last_write == expected_entry.get("modified"),
+                      "Shell source entry identity/tree changed before delete")
+                if not meta.directory:
+                    _need(sha256_file(observed_path) == expected_entry.get("sha256"),
+                          "Shell source file changed before delete")
+                seen_relatives.add(parsing_relative)
             _need(bool(flags & 0x80) == recycle, "Shell recycle/permanent intent mismatch")
-            state["pre"].append({"path": physical, "flags": flags})
+            state["pre"].append({"path": physical, "parsing_name": selected_parsing_name,
+                                 "relative": parsing_relative, "flags": flags})
             return 0
         def post(this, flags, source, status, created):
             _hr(status)
-            _need(bool(created) == recycle, "Shell bypassed expected recycling disposition")
+            if not recycle:
+                _need(not created, "Shell bypassed expected permanent disposition")
             state["post"].append({"flags": flags, "hresult": status,
                                   "created_parsing_name": self._name(created, 0x80028000) if created else None})
             return 0
@@ -1126,18 +1172,24 @@ class WindowsRecycleBin:
             aborted = ctypes.c_int()
             _hr(_call(operation, 22, (ctypes.POINTER(ctypes.c_int),), ctypes.byref(aborted)))
             _hr(performed)
-            _need(not aborted.value and not state["errors"] and len(state["pre"]) == 1 and len(state["post"]) == 1,
+            _need(not aborted.value and not state["errors"] and bool(state["pre"]) and bool(state["post"]),
                   "Shell operation aborted/incomplete:" + str(state))
+            if recycle and not any(entry.get("created_parsing_name") for entry in state["post"]):
+                message = "Shell bypassed expected recycling disposition:" + str(state)
+                _LOGGER.error(message)
+                raise OSError(message)
             return state
         finally:
             _call(item, 2, (), result=ctypes.c_ulong)
             _call(operation, 2, (), result=ctypes.c_ulong)
 
     def recycle(self, target: Path, *, expected_tree: dict | None = None) -> dict:
-        return self._operate(str(target), recycle=True, expected_path=str(target), expected_tree=expected_tree)
+        return self._operate(str(target), recycle=True, expected_path=str(target),
+                             expected_alias=str(target), expected_tree=expected_tree)
 
     def purge(self, item: dict, *, expected_tree: dict | None = None) -> dict:
-        return self._operate(item["parsing_name"], recycle=False, expected_path=item["path"], expected_tree=expected_tree)
+        return self._operate(item["parsing_name"], recycle=False, expected_path=item["path"],
+                             expected_alias=item["display_name"], expected_tree=expected_tree)
 
 
 def _unrelated(before: list[dict], after: list[dict], ignored: str | None = None) -> None:
