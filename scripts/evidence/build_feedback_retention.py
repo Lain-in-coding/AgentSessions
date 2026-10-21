@@ -1091,7 +1091,7 @@ class WindowsRecycleBin:
         item = self._item(parsing_name)
         callbacks: list[Any] = []
         state: dict[str, list[Any]] = {"pre": [], "post": [], "errors": []}
-        seen_relatives: set[str] = set()
+        seen_relatives: dict[str, tuple[int, int]] = {}
         iid_sink = uuid.UUID("04b0f1a7-9490-44bc-96e1-4296a31252e2").bytes_le
         iid_unknown = uuid.UUID("00000000-0000-0000-c000-000000000046").bytes_le
         def callback(args, handler):
@@ -1146,7 +1146,7 @@ class WindowsRecycleBin:
                     observed_path = Path(expected_path)
                 matches = [entry for entry in expected_tree["entries"]
                            if entry.get("relative") == parsing_relative]
-                _need(len(matches) == 1 and parsing_relative not in seen_relatives,
+                _need(len(matches) == 1,
                       "Shell source entry is outside or duplicated in sealed tree")
                 expected_entry = matches[0]
                 meta = _module("inventory")._new_metadata_reader().read(observed_path)
@@ -1159,7 +1159,10 @@ class WindowsRecycleBin:
                 if not meta.directory:
                     _need(sha256_file(observed_path) == expected_entry.get("sha256"),
                           "Shell source file changed before delete")
-                seen_relatives.add(parsing_relative)
+                prior = seen_relatives.get(parsing_relative)
+                _need(prior is None or prior == meta.identity,
+                      "Shell source entry was repeated with a different identity")
+                seen_relatives[parsing_relative] = meta.identity
             _need(bool(flags & 0x80) == recycle, "Shell recycle/permanent intent mismatch")
             state["pre"].append({"path": physical, "parsing_name": selected_parsing_name,
                                  "relative": parsing_relative, "flags": flags})
