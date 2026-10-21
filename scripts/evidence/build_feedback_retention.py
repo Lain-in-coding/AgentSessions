@@ -1136,6 +1136,11 @@ class WindowsRecycleBin:
                   f"Shell selected unexpected item: physical={physical!r} "
                   f"parsing={selected_parsing_name!r} expected={[str(root) for root in roots]!r}")
             if expected_tree is not None:
+                matches = [entry for entry in expected_tree["entries"]
+                           if entry.get("relative") == parsing_relative]
+                _need(len(matches) == 1,
+                      "Shell source entry is outside or duplicated in sealed tree")
+                expected_entry = matches[0]
                 observed_path = Path(selected_parsing_name)
                 if not observed_path.exists():
                     # For a recycle-bin item IFileOperation's display path is
@@ -1145,11 +1150,16 @@ class WindowsRecycleBin:
                     # storage path when the callback exposes only the display.
                     observed_path = (Path(expected_path) if parsing_relative == "."
                                      else Path(expected_path) / Path(parsing_relative))
-                matches = [entry for entry in expected_tree["entries"]
-                           if entry.get("relative") == parsing_relative]
-                _need(len(matches) == 1,
-                      "Shell source entry is outside or duplicated in sealed tree")
-                expected_entry = matches[0]
+                if not observed_path.exists() and not expected_entry.get("directory"):
+                    identity = tuple(expected_entry.get("identity", ()))
+                    _need(identity in seen_relatives.values(),
+                          "Shell source entry disappeared before its identity was verified")
+                    seen_relatives[parsing_relative] = identity
+                    _need(bool(flags & 0x80) == recycle, "Shell recycle/permanent intent mismatch")
+                    state["pre"].append({"path": physical, "parsing_name": selected_parsing_name,
+                                         "relative": parsing_relative, "flags": flags,
+                                         "already_deleted_hardlink": True})
+                    return 0
                 meta = _module("inventory")._new_metadata_reader().read(observed_path)
                 _need(list(meta.identity) == expected_entry.get("identity")
                       and meta.directory is expected_entry.get("directory")
