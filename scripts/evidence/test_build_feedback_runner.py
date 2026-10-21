@@ -989,6 +989,17 @@ class FullCapacityProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(RUNNER.ProtocolError, "fixed_pairs_required"):
             RUNNER._validate_protocol(changed)
 
+    def test_full_capacity_can_reserve_physical_growth_below_write_cap(self):
+        fields = self.full_fields(cap=32 * RUNNER.GIB)
+        fields["predicted_growth_bytes"] = 8 * RUNNER.GIB
+        protocol = RUNNER.make_protocol(fields)
+        RUNNER._validate_protocol(protocol)
+        self.assertEqual(protocol["predicted_growth_bytes"], 8 * RUNNER.GIB)
+        self.assertEqual(protocol["capacity_probe"]["owned_output_cap_bytes"], 32 * RUNNER.GIB)
+        sample = {"schema_version": 1, "complete": True, "errors": [],
+                  "allocated_bytes": 7 * RUNNER.GIB, "disk_free_bytes": 56 * RUNNER.GIB}
+        self.assertTrue(RUNNER.preview_protocol(protocol, sample)["allowed"])
+
     def test_full_cap_requires_prior_leaf_and_explicit_unmeasured_rationale(self):
         fields = self.full_fields()
         with patch.object(RUNNER, "_reservation_observation_peak", return_value=7 * RUNNER.GIB), self.assertRaisesRegex(RUNNER.ProtocolError, "leaf_margin"):
@@ -1218,12 +1229,14 @@ class FullCapacityArmClosureTests(unittest.TestCase):
     setUp = FullCapacityProtocolTests.setUp
     full_fields = FullCapacityProtocolTests.full_fields
 
-    def run_arm(self, *, stop=False, quality_error=False):
-        protocol = RUNNER.make_protocol(self.full_fields())
+    def run_arm(self, *, stop=False, quality_error=False, protocol_fields=None,
+                owned_bytes=5000, after_allocated_bytes=None):
+        protocol = RUNNER.make_protocol(protocol_fields or self.full_fields())
         source = Path(protocol["capacity_probe"]["source_root"])
         arm_root = Path(protocol["run_root"]) / "capacity"
         sample = {"schema_version": 1, "complete": True, "errors": [], "allocated_bytes": 7 * RUNNER.GIB,
                   "disk_free_bytes": 56 * RUNNER.GIB, "budget": {"allowed": True, "reasons": []}}
+        after_sample = {**sample, "allocated_bytes": after_allocated_bytes or sample["allocated_bytes"]}
         owner = self
         class FakeJob:
             def __init__(self):
@@ -1248,11 +1261,11 @@ class FullCapacityArmClosureTests(unittest.TestCase):
             return captures, 20
         real = RUNNER._inventory_module()
         inventory = SimpleNamespace(budget_status=real.budget_status,
-                                    inventory=lambda *args, **kwargs: {"schema_version": 1, "complete": True, "errors": [], "allocated_bytes": 5000})
+                                    inventory=lambda *args, **kwargs: {"schema_version": 1, "complete": True, "errors": [], "allocated_bytes": owned_bytes})
         with patch.object(RUNNER, "_declare_trial_output", return_value={"path": "fixture-lease"}), \
              patch.object(RUNNER, "WindowsJob", FakeJob), patch.object(RUNNER, "_LiveBudget", return_value=monitor), \
              patch.object(RUNNER, "_run_parallel_phase", side_effect=phase), patch.object(RUNNER, "build_process_snapshot", return_value=[]), \
-             patch.object(RUNNER, "_budget_sample", return_value=sample), patch.object(RUNNER, "_inventory_module", return_value=inventory), \
+             patch.object(RUNNER, "_budget_sample", side_effect=[sample, after_sample]), patch.object(RUNNER, "_inventory_module", return_value=inventory), \
              patch.object(RUNNER, "_memory_status", return_value={"physical_available": 4 * RUNNER.GIB, "commit_available": 30 * RUNNER.GIB}), \
              patch.dict(os.environ, {"CARGO_HOME": str(self.root)}):
             result = RUNNER._run_arm(protocol, "candidate", source, arm_root, None)
@@ -1289,6 +1302,22 @@ class FullCapacityArmClosureTests(unittest.TestCase):
         self.assertEqual(len(arm["jobs"]), 6)
         self.assertTrue((arm_root / "arm.json").is_file())
 
+    def test_physical_allocation_over_reservation_is_not_hidden_by_larger_write_cap(self):
+        fields = self.full_fields(cap=32 * RUNNER.GIB)
+        fields["predicted_growth_bytes"] = 8 * RUNNER.GIB
+        arm, _source, _arm_root = self.run_arm(protocol_fields=fields,
+                                               owned_bytes=9 * RUNNER.GIB)
+        self.assertEqual(arm["status"], "budget_limited")
+        self.assertEqual(arm["reasons"], ["arm_reservation_allocation_overrun"])
+
+    def test_transient_physical_peak_over_reservation_stops_before_final_scan(self):
+        fields = self.full_fields(cap=32 * RUNNER.GIB)
+        fields["predicted_growth_bytes"] = 8 * RUNNER.GIB
+        arm, _source, _arm_root = self.run_arm(
+            protocol_fields=fields, after_allocated_bytes=16 * RUNNER.GIB)
+        self.assertEqual(arm["status"], "budget_limited")
+        self.assertEqual(arm["reasons"], ["physical_reservation_exceeded"])
+
 
 class FullQualificationCaptureTests(unittest.TestCase):
     """Real cumulative monitor and capture producer; no Cargo compilation or deletion."""
@@ -1296,8 +1325,8 @@ class FullQualificationCaptureTests(unittest.TestCase):
     full_fields = FullCapacityProtocolTests.full_fields
     make_arm = FullCapacityExecutionTests.make_arm
 
-    def qualified_arm(self):
-        fields = self.full_fields()
+    def qualified_arm(self, *, fields=None):
+        fields = fields or self.full_fields()
         script = self.root / "vcvarsall.bat"
         script.write_bytes(b"fixture msvc script")
         receipt = self.root / "msvc.json"
@@ -1381,13 +1410,26 @@ class FullQualificationCaptureTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok", result["reasons"])
         self.assertEqual(result["resource_guard"]["origin_allocated_bytes"], 7 * RUNNER.GIB)
         self.assertEqual(result["resource_guard"]["origin_disk_free_bytes"], 56 * RUNNER.GIB)
-        self.assertEqual(result["resource_guard"]["prior_write_bound_bytes"], 5000)
-        self.assertEqual(result["final_job_write_bound_bytes"], 5100)
+        self.assertEqual(result["resource_guard"]["prior_write_bound_bytes"], 4000)
+        self.assertEqual(result["final_job_write_bound_bytes"], 4100)
         self.assertEqual(result["minimum_disk_free_bytes"], 54 * RUNNER.GIB)
-        self.assertEqual(result["resource_samples"][0]["job_write_bound_bytes"], 5100)
-        self.assertEqual(result["qualification_budget"]["final_job_write_bound_bytes"], 5100)
+        self.assertEqual(result["resource_samples"][0]["job_write_bound_bytes"], 4100)
+        self.assertEqual(result["qualification_budget"]["final_job_write_bound_bytes"], 4100)
         self.assertEqual(RUNNER._read_json(Path(arm["target_root"]).parent / "qualification-captures/clippy/capture.json"), result)
         self.assertEqual(result["argv"][1:4], ["clippy", "--workspace", "--all-targets"])
+
+    def test_qualifier_uses_owned_write_cap_not_physical_reservation(self):
+        fields = self.full_fields(cap=32 * RUNNER.GIB)
+        fields["predicted_growth_bytes"] = 8 * RUNNER.GIB
+        protocol, arm = self.qualified_arm(fields=fields)
+        arm["final_job_write_bound_bytes"] = 12 * RUNNER.GIB
+        write_json(Path(arm["target_root"]).parent / "arm.json", arm)
+        result = self.run_with_context(protocol, arm)
+        self.assertEqual(result["status"], "ok", result["reasons"])
+        self.assertEqual(result["resource_guard"]["owned_output_cap_bytes"],
+                         32 * RUNNER.GIB)
+        self.assertEqual(result["resource_guard"]["prior_write_bound_bytes"],
+                         12 * RUNNER.GIB)
 
     def test_guarded_qualifier_stop_does_not_report_complete_quality(self):
         protocol, arm = self.qualified_arm()
@@ -1457,6 +1499,15 @@ class FullQualificationCaptureTests(unittest.TestCase):
         finally:
             for stub in reversed(stubs):
                 stub.stop()
+
+    def test_qualification_physical_peak_over_reservation_refuses_before_launch(self):
+        protocol, arm = self.qualified_arm()
+        arm["jobs"][0]["resource_samples"][0]["allocated_bytes"] = 16 * RUNNER.GIB
+        write_json(Path(arm["target_root"]).parent / "arm.json", arm)
+        with patch.object(RUNNER, "_retention_module", return_value=SimpleNamespace(validate_policy=lambda approved: ({}, {}))), \
+             patch.object(RUNNER, "WindowsJob", side_effect=AssertionError("physical overrun cannot launch")), \
+             self.assertRaisesRegex(RUNNER.ProtocolError, "physical_reservation_exceeded"):
+            RUNNER.capture_qualification(protocol, arm, "clippy")
 
     def test_live_monitor_carries_prior_writes_and_historical_free_minimum(self):
         protocol = {"schema_version": 2, "phase": "capacity", "baseline": {"allocated_bytes": 0},
@@ -1569,6 +1620,28 @@ class BoundedLiveBudgetTests(unittest.TestCase):
         self.assertFalse(sample["budget"]["allowed"])
         self.assertEqual(sample["budget"]["reasons"], ["owned_output_cap_reached"])
         self.assertEqual(sample["job_write_bound_bytes"], 8 * RUNNER.GIB)
+
+    def test_full_capacity_separates_physical_reservation_from_owned_write_cap(self):
+        protocol = {**self.protocol, "capacity_probe": {
+            "kind": "full-arm-and-qualification", "owned_output_cap_bytes": 32 * RUNNER.GIB}}
+        with (
+            patch.object(RUNNER, "_free_bytes", return_value=56 * RUNNER.GIB),
+            patch.object(RUNNER._LiveBudget, "_write_bound", side_effect=[0, 12 * RUNNER.GIB]),
+        ):
+            monitor = RUNNER._LiveBudget(protocol, self.before, None)
+            sample = monitor()
+        self.assertTrue(sample["budget"]["allowed"])
+        self.assertEqual(sample["allocated_bytes"], 7 * RUNNER.GIB)
+        self.assertEqual(sample["job_write_bound_bytes"], 12 * RUNNER.GIB)
+        self.assertNotIn("owned_output_cap_reached", sample["budget"]["reasons"])
+        with (
+            patch.object(RUNNER, "_free_bytes", return_value=56 * RUNNER.GIB),
+            patch.object(RUNNER._LiveBudget, "_write_bound", side_effect=[0, 32 * RUNNER.GIB]),
+        ):
+            monitor = RUNNER._LiveBudget(protocol, self.before, None)
+            sample = monitor()
+        self.assertFalse(sample["budget"]["allowed"])
+        self.assertEqual(sample["budget"]["reasons"], ["owned_output_cap_reached"])
 
     def test_external_growth_is_never_mislabeled_owned_capacity_stop(self):
         with patch.object(RUNNER, "_free_bytes", return_value=48 * RUNNER.GIB), patch.object(RUNNER._LiveBudget, "_write_bound", return_value=0):

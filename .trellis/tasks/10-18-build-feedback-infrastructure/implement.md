@@ -481,3 +481,29 @@ Newv2protocol/retentionapproval/controlkey validated andcontrolstore is counted;
 runroot/targets/nativefixture remain absent. Latestresource38.211GiB/quietfalse
 has a pinned refusalreceipt. No realrun or fulladmission is claimed. Frozen
 releaseproducer scratchcleanup compatibility remains an actualexecution limit.
+
+## Live allocation/write-domain correction (2026-10-21)
+
+The expanded full-capacity attempts exposed a domain error in the live guard:
+physical project allocation was bounded by `max(physical_growth, JobIO writes)`.
+At the 23.5 GiB write cap the measured physical growth was only 5.57 GiB, yet
+the guard projected write bytes as retained project allocation and stopped two
+otherwise-running jobs. The corrected contract separates the domains.
+
+- `predicted_growth_bytes` is the physical project-allocation reservation used
+  by preview, owner review, fixed-B review/hard checks and free-space admission.
+- `capacity_probe.owned_output_cap_bytes` remains the independent cumulative
+  Job Object write cap.
+- Live `allocated_bytes` uses admission allocation plus measured physical growth.
+  JobIO writes are used only for the owned cap and MBX/store guard.
+- Initial leaf and paired protocols keep their previous equal reservation/write
+  behavior; expanded full capacity may reserve less physical growth than its
+  declared write cap.
+- `prepare-full --physical-growth-reservation-bytes` makes the distinction
+  explicit and defaults to the owned cap for backward compatibility.
+
+Verification checkpoint before commit: aggregate 294 tests passed in 496.941
+seconds; Ruff and Mypy passed all 12 build-feedback Python files. Independent
+incremental review fixed physical-final/instantaneous reservation checks,
+qualification write accounting, coordinator seal/observation refusal and added
+the corresponding regressions.

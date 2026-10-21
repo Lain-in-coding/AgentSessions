@@ -42,6 +42,15 @@ is a prerequisite, not a full-workload peak.
 Both compared configurations need full observation coverage before measured
 Pilot reservation can use the maximum verified peak plus margin.
 
+For an expanded full-capacity protocol, `predicted_growth_bytes` is the
+physical project-allocation reservation used for the fixed-B hard limit,
+review ceiling and free-space admission. `capacity_probe.owned_output_cap_bytes`
+is a separate cumulative Job I/O write cap. Live monitoring uses measured
+physical growth for project allocation and uses the write bound only for that
+owned cap and cache-store reservation; transient compiler writes must not be
+added to retained project allocation. Initial leaf and paired protocols retain
+their stricter equal-reservation behavior.
+
 For v2, generated qualification allocations pin the official release suite
 under that arm source's ignored evidence-output/build-feedback directory.
 Keep the unchanged official reports and suite binary at their originating

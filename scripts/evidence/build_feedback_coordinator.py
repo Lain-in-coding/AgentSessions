@@ -87,6 +87,12 @@ def _require(condition: bool, reason: str) -> None:
         raise ValueError(reason)
 
 
+def _verify_full_capacity_physical_reservation(protocol: dict[str, Any], value: Any,
+                                               reason: str) -> None:
+    """Keep physical output growth separate from the cumulative Job I/O cap."""
+    _require(type(value) is int and 0 <= value <= protocol["predicted_growth_bytes"], reason)
+
+
 def _verify_arm_receipt(arm_receipt: dict[str, Any], arm_record: dict[str, Any]) -> Path:
     reference = arm_receipt
     if not isinstance(reference, dict) or set(reference) != {"path", "sha256"}:
@@ -358,9 +364,17 @@ def finalize_arm(*, protocol: dict[str, Any], phase: str, arm: str,
                     if phase == "capacity"
                     else retention.verify_retained_arm(link, protocol, arm, pair_index, attempt))
         _require(retained.get("arm_receipt") == arm_record, "retained link changed the arm")
+        if phase == "capacity":
+            _verify_full_capacity_physical_reservation(
+                protocol, retained["seal"].get("task_output_allocated_bytes"),
+                "full capacity retained physical reservation exceeded")
         return link
 
     normalized = benchmark.normalize_runner_arm(arm_record, protocol)
+    if phase == "capacity":
+        _verify_full_capacity_physical_reservation(
+            protocol, arm_record.get("owned_allocated_bytes"),
+            "full capacity arm physical reservation exceeded")
     _require(all(normalized.get(flag) is True for flag in
                  ("capture_complete", "source_verified", "artifacts_verified", "allocation_complete", "quiet")),
              "arm closure incomplete before qualification")
@@ -385,6 +399,11 @@ def finalize_arm(*, protocol: dict[str, Any], phase: str, arm: str,
                 if phase == "capacity" else
                 retention.create_seal(protocol, normalized, arm, pair_index, attempt,
                                       arm_record["output_lease"], qualifications, seal_path))
+    seal_payload = retention._verify_seal(seal, protocol)
+    if phase == "capacity":
+        _verify_full_capacity_physical_reservation(
+            protocol, seal_payload.get("task_output_allocated_bytes"),
+            "full capacity sealed physical reservation exceeded")
     _require(target.resolve(strict=False) == Path(arm_record["target_root"]), "sealed target changed")
     disposition = retention.dispose_output(seal, protocol, arm_root / "disposition")
     link = _new(link_path, {"seal": seal, "disposition": disposition})
@@ -432,6 +451,9 @@ def make_reservation_observation(protocol_path: str | Path, campaign_path: str |
     _require(seal.get("status") == "ok" and seal.get("workload_complete") is True
              and seal.get("reservation_eligible") is True,
              "successful retained full capacity seal required")
+    _verify_full_capacity_physical_reservation(
+        protocol, seal.get("task_output_allocated_bytes"),
+        "full capacity reservation physical allocation exceeded")
     payload = {
         "schema_version": 1,
         "kind": "build-feedback-reservation-observation",
@@ -595,7 +617,8 @@ def _retention_approval(*, protocol_seed: dict[str, Any], run_root: Path,
 
 def prepare_full_capacity(seed_protocol_path: str | Path, prerequisite_observation: str | Path,
                           arm: str, capacity_source_root: str | Path, run_root: str | Path,
-                          control_root: str | Path, owned_output_cap_bytes: int) -> dict[str, Any]:
+                          control_root: str | Path, owned_output_cap_bytes: int,
+                          physical_growth_reservation_bytes: int | None = None) -> dict[str, Any]:
     """Prepare one fresh v2 full-capacity arm and its exact retention authority."""
     runner = _module("runner")
     seed = _read(seed_protocol_path)
@@ -604,6 +627,13 @@ def prepare_full_capacity(seed_protocol_path: str | Path, prerequisite_observati
     _normalize_diagnostic_sentinel(capacity_source_root)
     _normalize_diagnostic_sentinel(Path(seed["source"]["root"]).resolve(strict=True))
     _require(arm in {"baseline", "candidate"}, "full capacity arm required")
+    _require(type(owned_output_cap_bytes) is int and owned_output_cap_bytes > 0,
+             "positive owned output cap required")
+    if physical_growth_reservation_bytes is None:
+        physical_growth_reservation_bytes = owned_output_cap_bytes
+    _require(type(physical_growth_reservation_bytes) is int
+             and physical_growth_reservation_bytes > 0,
+             "positive physical growth reservation required")
     _require(not run_root.exists() and not control_root.exists(), "fresh full capacity roots required")
     prerequisite = _reference(prerequisite_observation)
     candidate = {"debug": "line-tables-only", "incremental": "on",
@@ -654,7 +684,7 @@ def prepare_full_capacity(seed_protocol_path: str | Path, prerequisite_observati
         "allocations": [],
         "inventory_roots": inventory_roots,
         "store_roots": store_roots,
-        "predicted_growth_bytes": owned_output_cap_bytes,
+        "predicted_growth_bytes": physical_growth_reservation_bytes,
         "capacity_probe": {"kind": "full-arm-and-qualification", "stage": "expanded",
                            "source_root": str(capacity_source_root), "arm": arm,
                            "owned_output_cap_bytes": owned_output_cap_bytes},
@@ -1045,6 +1075,7 @@ def parser() -> argparse.ArgumentParser:
     full.add_argument("--run-root", required=True)
     full.add_argument("--control-root", required=True)
     full.add_argument("--owned-output-cap-bytes", type=int, required=True)
+    full.add_argument("--physical-growth-reservation-bytes", type=int)
     leaf = commands.add_parser("prepare-leaf")
     leaf.add_argument("--seed-protocol", required=True)
     leaf.add_argument("--capacity-source-root", required=True)
@@ -1097,7 +1128,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.command == "prepare-full":
         value = prepare_full_capacity(
             args.seed_protocol, args.leaf_observation, args.arm, args.capacity_source_root,
-            args.run_root, args.control_root, args.owned_output_cap_bytes)
+            args.run_root, args.control_root, args.owned_output_cap_bytes,
+            args.physical_growth_reservation_bytes)
     elif args.command == "prepare-leaf":
         value = prepare_initial_leaf(
             args.seed_protocol, args.capacity_source_root, args.run_root,

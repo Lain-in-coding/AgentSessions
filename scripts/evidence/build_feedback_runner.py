@@ -498,6 +498,13 @@ def _full_capacity(protocol: dict) -> bool:
     return protocol.get("schema_version") == 2 and protocol.get("phase") == "capacity" and protocol.get("capacity_probe", {}).get("kind") == "full-arm-and-qualification"
 
 
+def _owned_output_cap(protocol: dict) -> int:
+    """Return the cumulative owned-write cap, separate from physical reservation."""
+    if _full_capacity(protocol):
+        return _count(protocol["capacity_probe"]["owned_output_cap_bytes"], "owned_output_cap_bytes", positive=True)
+    return _count(protocol["predicted_growth_bytes"], "predicted_growth_bytes", positive=True)
+
+
 def qualification_allocations(protocol: dict) -> list[dict]:
     """Reconstruct source-relative official suites; caller-selected paths have no authority."""
     allocated = []
@@ -545,11 +552,12 @@ def _add_bounded_contract(protocol: dict, data: dict, live: Path, coordinator: P
             _require(probe["package"] in ("agent-session-grep-domain", "agent-session-grep-ports") and probe["command"] in ("check", "test"), "single_leaf_capacity_command_required")
             _require(probe["stage"] in ("initial", "expanded"), "invalid_capacity_stage")
         cap = _count(probe["owned_output_cap_bytes"], "owned_output_cap_bytes", positive=True)
-        _require(cap == protocol["predicted_growth_bytes"], "capacity_reservation_must_equal_owned_cap")
         if full:
             _require(cap >= INITIAL_CAPACITY_OUTPUT_CAP_BYTES, "declared_full_capacity_cap_at_least_8gib")
-        elif probe["stage"] == "initial":
-            _require(cap == INITIAL_CAPACITY_OUTPUT_CAP_BYTES, "initial_capacity_cap_must_be_8gib")
+        else:
+            _require(cap == protocol["predicted_growth_bytes"], "capacity_reservation_must_equal_owned_cap")
+            if probe["stage"] == "initial":
+                _require(cap == INITIAL_CAPACITY_OUTPUT_CAP_BYTES, "initial_capacity_cap_must_be_8gib")
         root = _path(probe["source_root"], "capacity_source_root")
         _dedicated_source(root, live, coordinator)
         _require(not any(_inside(root, other) or _inside(other, root) for other in (Path(protocol["source"]["root"]), Path(protocol["run_root"]), *allocated_sources)), "capacity_source_must_be_distinct")
@@ -1539,18 +1547,21 @@ class _LiveBudget:
         self.floor_free = min(self.floor_free, free)
         physical_growth = max(0, self.start_free - self.floor_free)
         writes = self.prior_write_bound_bytes + max(0, self._write_bound() - self.io_origin)
-        growth = max(physical_growth, writes)
-        allocated_bound = self.before["allocated_bytes"] + growth
+        write_bound = max(physical_growth, writes)
+        # Project allocation is measured by physical growth. Cumulative Job I/O
+        # remains an independent owned-write cap and cache-store bound; adding it
+        # to project allocation would double-count transient compiler writes.
+        allocated_bound = self.before["allocated_bytes"] + physical_growth
         budget = _inventory_module().budget_status(self.protocol["baseline"]["allocated_bytes"], allocated_bound, free, 0, **_budget_keywords(self.protocol))
         if free < self.review_floor_bytes:
             budget["allowed"] = False
             budget["reasons"].append("budget_review_free_space_floor_exceeded")
         if self.config is not None:
             tool = self.config["tool"]
-            if tool["kind"] == "mbx" and self.store_bytes + growth >= tool["store_limit_bytes"]:
+            if tool["kind"] == "mbx" and self.store_bytes + write_bound >= tool["store_limit_bytes"]:
                 budget["allowed"] = False
                 budget["reasons"].append("store_reservation_write_bound_reached")
-        if self.protocol.get("schema_version") == 2 and writes >= self.protocol["predicted_growth_bytes"]:
+        if self.protocol.get("schema_version") == 2 and writes >= _owned_output_cap(self.protocol):
             budget["allowed"] = False
             budget["reasons"].append("owned_output_cap_reached" if self.protocol["phase"] == "capacity" else "arm_reservation_write_bound_reached")
         registered = _registered_reasons(self.protocol, allocated_bound)
@@ -1962,7 +1973,7 @@ def _run_arm(protocol: dict, arm: str, source: Path, arm_root: Path, review_rece
         if protocol.get("schema_version") == 2:
             result["disk_free_before_bytes"] = before["disk_free_bytes"]
             result["resource_guard"] = {"kind": "windows-job-and-cumulative-owned-output-cap", "memory_limit_bytes": MEMORY_LIMIT_BYTES,
-                                        "owned_output_cap_bytes": protocol["predicted_growth_bytes"],
+                                        "owned_output_cap_bytes": _owned_output_cap(protocol),
                                         "minimum_free_bytes": _disk_floor(protocol), "external_growth_allowance_bytes": _external_allowance(protocol)}
         job = WindowsJob()
         memory = _memory_status()
@@ -2062,6 +2073,11 @@ def _run_arm(protocol: dict, arm: str, source: Path, arm_root: Path, review_rece
             if after_reasons and result["status"] in (("ok", "capacity_limited") if _full_capacity(protocol) else ("ok",)):
                 result["status"], result["reasons"] = "budget_limited", sorted(set(after_reasons))
             result["peak_allocated_bytes"] = max([after["allocated_bytes"], result.get("allocated_before_bytes", 0), *[sample["allocated_bytes"] for entry in result["jobs"] + result["feedback_warm_jobs"] + result["edit_jobs"] for sample in entry["resource_samples"]]])
+            if (protocol.get("schema_version") == 2
+                    and result["peak_allocated_bytes"]
+                    > result["allocated_before_bytes"] + protocol["predicted_growth_bytes"]
+                    and result["status"] in ("ok", "capacity_limited")):
+                result["status"], result["reasons"] = "budget_limited", ["physical_reservation_exceeded"]
             result["retained_growth_bytes"] = max(0, after["allocated_bytes"] - result.get("allocated_before_bytes", after["allocated_bytes"]))
             target_report = _inventory_module().inventory([], store_roots=[targets_root], discover=False, **({"minimum_free_bytes": _disk_floor(protocol)} if protocol.get("schema_version") == 2 else {}))
             _require(target_report.get("complete") is True and target_report.get("errors") == [], "target_allocation_capture_incomplete")
@@ -2075,7 +2091,7 @@ def _run_arm(protocol: dict, arm: str, source: Path, arm_root: Path, review_rece
             if protocol.get("schema_version") == 2:
                 if result["owned_allocated_bytes"] > protocol["predicted_growth_bytes"] and result["status"] in ("ok", "capacity_limited"):
                     result["status"], result["reasons"] = "budget_limited", ["arm_reservation_allocation_overrun"]
-                if result.get("final_job_write_bound_bytes", 0) >= protocol["predicted_growth_bytes"] and result["status"] == "ok":
+                if result.get("final_job_write_bound_bytes", 0) >= _owned_output_cap(protocol) and result["status"] == "ok":
                     result["status"], result["reasons"] = "budget_limited", ["unobserved_capacity_guard_overrun"]
             owned_report["storage_scope"] = "owned_targets_and_stores"
             result["owned_allocation_receipt"] = owned_report
@@ -2268,7 +2284,7 @@ def _qualification_prior(protocol: dict, arm_record: dict, directory: Path, prio
         _require(capture.get("protocol_sha256") == canonical_sha256(protocol)
                  and capture.get("source_root") == arm_record["source_root"] and capture.get("arm") == arm_record["arm"]
                  and guard.get("kind") == "windows-job-and-cumulative-owned-output-cap"
-                 and guard.get("owned_output_cap_bytes") == protocol["predicted_growth_bytes"]
+                 and guard.get("owned_output_cap_bytes") == _owned_output_cap(protocol)
                  and guard.get("origin_allocated_bytes") == arm_record.get("allocated_before_bytes")
                  and guard.get("origin_disk_free_bytes") == arm_record.get("disk_free_before_bytes")
                  and guard.get("memory_limit_bytes") == MEMORY_LIMIT_BYTES
@@ -2281,8 +2297,7 @@ def _qualification_prior(protocol: dict, arm_record: dict, directory: Path, prio
         expected_path = directory / capture["qualification"] / "owned-allocation.json"
         _require(Path(allocation_path["path"]) == expected_path and allocation.get("complete") is True and allocation.get("errors") == []
                  and allocation.get("allocated_bytes") == capture.get("owned_allocated_bytes"), "qualification_prior_allocation_invalid")
-        previous = max(_count(capture.get("final_job_write_bound_bytes"), "prior_final_write_bound"),
-                       _count(capture.get("owned_allocated_bytes"), "prior_owned_allocated_bytes"))
+        previous = _count(capture.get("final_job_write_bound_bytes"), "prior_final_write_bound")
         floor = _count(capture.get("minimum_disk_free_bytes"), "prior_minimum_disk_free_bytes")
         for stream in ("stdout", "stderr"):
             _require(sha256_file(Path(capture[stream + "_path"])) == capture[stream + "_sha256"], "qualification_prior_log_changed")
@@ -2324,6 +2339,7 @@ def capture_qualification(protocol: dict, arm_record: dict, qualification: str, 
     _require(before["allocated_bytes"] <= review_cap and before["disk_free_bytes"] >= review_floor, "qualification_review_ceiling_reached")
     original = {"allocated_bytes": _count(arm_record.get("allocated_before_bytes"), "arm_original_allocated_bytes"),
                 "disk_free_bytes": _count(arm_record.get("disk_free_before_bytes"), "arm_original_disk_free_bytes")}
+    physical_limit = original["allocated_bytes"] + protocol["predicted_growth_bytes"]
     prior_writes = _count(arm_record.get("final_job_write_bound_bytes"), "arm_final_write_bound")
     minimum_free = min(original["disk_free_bytes"], _count(arm_record.get("minimum_disk_free_bytes"), "arm_minimum_disk_free_bytes"))
     captures = [capture for field in ("jobs", "feedback_warm_jobs", "edit_jobs") for capture in arm_record[field]] + prior
@@ -2332,6 +2348,8 @@ def capture_qualification(protocol: dict, arm_record: dict, qualification: str, 
     for capture in captures:
         for sample in capture["resource_samples"]:
             _require(sample.get("allocation_kind") == "conservative-disk-and-job-write-bound", "real_qualification_resource_samples_required")
+            _require(_count(sample.get("allocated_bytes"), "qualification_physical_allocated_bytes") <= physical_limit,
+                     "qualification_physical_reservation_exceeded")
             prior_writes = max(prior_writes, _count(sample.get("job_write_bound_bytes"), "prior_cumulative_write_bound"))
             minimum_free = min(minimum_free, _count(sample.get("disk_free_bytes"), "prior_capture_disk_free_bytes"))
         if capture in prior:
@@ -2339,8 +2357,9 @@ def capture_qualification(protocol: dict, arm_record: dict, qualification: str, 
             minimum_free = min(minimum_free, _count(capture.get("minimum_disk_free_bytes"), "prior_minimum_disk_free_bytes"))
     owned = _inventory_module().inventory([], store_roots=_arm_owned_roots(protocol, arm_record), discover=False, minimum_free_bytes=_disk_floor(protocol))
     _require(owned.get("complete") is True and owned.get("errors") == [], "qualification_owned_allocation_incomplete")
-    prior_writes = max(prior_writes, _count(owned.get("allocated_bytes"), "qualification_owned_bytes"))
-    _require(prior_writes < protocol["predicted_growth_bytes"], "qualification_cumulative_cap_already_reached")
+    owned_bytes = _count(owned.get("allocated_bytes"), "qualification_owned_bytes")
+    _require(owned_bytes <= protocol["predicted_growth_bytes"], "qualification_physical_reservation_exceeded")
+    _require(prior_writes < _owned_output_cap(protocol), "qualification_cumulative_cap_already_reached")
     memory = _memory_status()
     _require(memory["physical_available"] >= 2 * GIB and memory["commit_available"] >= 2 * GIB, "system_resource_headroom_insufficient")
     if qualification == "release":
@@ -2369,7 +2388,7 @@ def capture_qualification(protocol: dict, arm_record: dict, qualification: str, 
                       config_sha256=canonical_sha256(arm_record["config"]), process_tree_drained=True,
                       final_job_write_bound_bytes=prior_writes + max(0, monitor._write_bound() - monitor.io_origin),
                       minimum_disk_free_bytes=monitor.floor_free, resource_guard={"kind": "windows-job-and-cumulative-owned-output-cap",
-                      "memory_limit_bytes": MEMORY_LIMIT_BYTES, "owned_output_cap_bytes": protocol["predicted_growth_bytes"],
+                      "memory_limit_bytes": MEMORY_LIMIT_BYTES, "owned_output_cap_bytes": _owned_output_cap(protocol),
                       "minimum_free_bytes": _disk_floor(protocol), "external_growth_allowance_bytes": _external_allowance(protocol),
                       "origin_allocated_bytes": original["allocated_bytes"], "origin_disk_free_bytes": original["disk_free_bytes"],
                       "prior_write_bound_bytes": prior_writes, "prior_minimum_disk_free_bytes": minimum_free})
@@ -2397,7 +2416,7 @@ def capture_qualification(protocol: dict, arm_record: dict, qualification: str, 
         result["owned_allocated_bytes"] = _count(final.get("allocated_bytes"), "qualification_final_allocated_bytes")
         if result["owned_allocated_bytes"] > protocol["predicted_growth_bytes"] and result["status"] in ("ok", "capacity_limited"):
             result["status"], result["reasons"] = "budget_limited", ["qualification_owned_output_cap_overrun"]
-        elif result["status"] == "ok" and result["final_job_write_bound_bytes"] >= protocol["predicted_growth_bytes"]:
+        elif result["status"] == "ok" and result["final_job_write_bound_bytes"] >= _owned_output_cap(protocol):
             result["status"], result["reasons"] = "budget_limited", ["qualification_unobserved_guard_overrun"]
         result["finished_at"] = _stamp()
     except (OSError, ProtocolError, subprocess.SubprocessError, UnicodeError, KeyError, ValueError) as error:

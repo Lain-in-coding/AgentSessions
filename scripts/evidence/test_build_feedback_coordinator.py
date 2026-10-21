@@ -147,13 +147,30 @@ class PreparationTests(unittest.TestCase):
                               return_value={"x": [{"path": "sentinel", "line": 3}]}):
                 COORDINATOR.prepare_full_capacity(
                     seed_path, root / "leaf.json", "candidate", source,
-                    root / "run", root / "control", 20 * 1024 ** 3)
+                    root / "run", root / "control", 20 * 1024 ** 3,
+                    8 * 1024 ** 3)
             self.assertEqual(captured["candidate_config"],
                              {"debug": "line-tables-only", "incremental": "on",
                               "layout": "3lane", "tool": {"kind": "native"}})
             self.assertEqual(captured["baseline_config"],
                              {"debug": "full", "incremental": "on",
                               "layout": "isolated", "tool": {"kind": "native"}})
+            self.assertEqual(captured["predicted_growth_bytes"], 8 * 1024 ** 3)
+            self.assertEqual(captured["capacity_probe"]["owned_output_cap_bytes"],
+                             20 * 1024 ** 3)
+            captured.clear()
+            with patch.object(COORDINATOR, "_module", return_value=fake_runner), \
+                 patch.object(COORDINATOR, "_reference",
+                              return_value={"path": str(root / "leaf.json"), "sha256": "1" * 64}), \
+                 patch.object(COORDINATOR, "_retention_approval", return_value={}), \
+                 patch.object(COORDINATOR, "_new", return_value=approval), \
+                 patch.object(COORDINATOR, "_diagnostic_source_checks",
+                              return_value={"x": [{"path": "sentinel", "line": 3}]}):
+                COORDINATOR.prepare_full_capacity(
+                    seed_path, root / "leaf.json", "candidate", source,
+                    root / "run-default", root / "control-default",
+                    20 * 1024 ** 3)
+            self.assertEqual(captured["predicted_growth_bytes"], 20 * 1024 ** 3)
 
 
 class QualificationProofTests(unittest.TestCase):
@@ -229,6 +246,15 @@ class QualificationProofTests(unittest.TestCase):
 
 
 class LifecycleTests(unittest.TestCase):
+    def test_full_capacity_physical_reservation_is_independent_of_write_cap(self):
+        protocol = {"predicted_growth_bytes": 8 * 1024 ** 3,
+                    "capacity_probe": {"owned_output_cap_bytes": 32 * 1024 ** 3}}
+        COORDINATOR._verify_full_capacity_physical_reservation(
+            protocol, 8 * 1024 ** 3, "physical reservation exceeded")
+        with self.assertRaisesRegex(ValueError, "physical reservation exceeded"):
+            COORDINATOR._verify_full_capacity_physical_reservation(
+                protocol, 9 * 1024 ** 3, "physical reservation exceeded")
+
     def test_qualifications_run_in_frozen_order_and_emit_proofs(self):
         with tempfile.TemporaryDirectory() as directory:
             arm_root = Path(directory)
@@ -274,6 +300,7 @@ class LifecycleTests(unittest.TestCase):
                 "run_root": str(root / "run"),
                 "configs": {"baseline": {"debug": "full", "incremental": "on",
                                          "layout": "isolated", "tool": {"kind": "native"}}},
+                "predicted_growth_bytes": 8 * 1024 ** 3,
                 "capacity_probe": {"kind": "full-arm-and-qualification",
                                    "stage": "expanded", "arm": "baseline",
                                    "source_root": str(root / "source")},
@@ -285,17 +312,19 @@ class LifecycleTests(unittest.TestCase):
                 "config": protocol["configs"]["baseline"],
                 "protocol_sha256": "a" * 64,
                 "output_lease": {"path": str(root / "lease.json"), "sha256": "b" * 64},
+                "owned_allocated_bytes": 1024 ** 3,
             }
             arm_receipt = {"path": str(arm_root / "arm.json"), "sha256": "c" * 64}
             seal = {"path": str(arm_root / "full-capacity-seal.json"), "sha256": "d" * 64}
+            seal_payload = {**seal, "task_output_allocated_bytes": 1024 ** 3}
             disposition = {"path": str(arm_root / "disposition/completed.json"), "sha256": "e" * 64}
             fake_retention = SimpleNamespace(
                 validate_policy=lambda protocol: ({}, {}),
                 create_full_capacity_seal=lambda *args: seal,
                 dispose_output=lambda *args: disposition,
-                _verify_seal=lambda reference, approved: None,
+                _verify_seal=lambda reference, approved: seal_payload,
                 verify_full_capacity_link=lambda reference, approved: {
-                    "arm_receipt": arm_record, "seal": seal, "disposition": disposition,
+                    "arm_receipt": arm_record, "seal": seal_payload, "disposition": disposition,
                 },
             )
             fake_runner = SimpleNamespace(_validate_protocol=lambda protocol: None,
