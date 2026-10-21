@@ -51,6 +51,12 @@ owned cap and cache-store reservation; transient compiler writes must not be
 added to retained project allocation. Initial leaf and paired protocols retain
 their stricter equal-reservation behavior.
 
+Measurement Cargo children set `ASG_BUILD_FEEDBACK_JOB=1`. Tests whose purpose is
+to verify breakaway/detached supervisor or purge-worker behavior run in a
+separate normal-process preflight; inside the kill-on-close measurement Job
+Object they emit an explicit preflight-only result instead of weakening the
+job boundary or hanging the whole CLI suite.
+
 For v2, generated qualification allocations pin the official release suite
 under that arm source's ignored evidence-output/build-feedback directory.
 Keep the unchanged official reports and suite binary at their originating

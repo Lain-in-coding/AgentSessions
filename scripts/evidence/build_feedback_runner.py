@@ -912,7 +912,7 @@ def tool_environment(protocol: dict, config: dict, *, feedback: bool = False) ->
             raise ProtocolError("cargo_home_identity_required")
         cargo_home = str(Path(profile) / ".cargo")
     environment["CARGO_HOME"] = str(_path(cargo_home, "cargo_home"))
-    environment.update(RUSTC=protocol["toolchain"]["rustc"]["path"], RUSTC_WRAPPER="", RUSTC_WORKSPACE_WRAPPER="", RUSTFLAGS="", CARGO_ENCODED_RUSTFLAGS="", CARGO_BUILD_JOBS="2", CARGO_NET_OFFLINE="true", CARGO_INCREMENTAL="1" if feedback or config["incremental"] == "on" else "0",
+    environment.update(RUSTC=protocol["toolchain"]["rustc"]["path"], RUSTC_WRAPPER="", RUSTC_WORKSPACE_WRAPPER="", RUSTFLAGS="", CARGO_ENCODED_RUSTFLAGS="", CARGO_BUILD_JOBS="2", CARGO_NET_OFFLINE="true", ASG_BUILD_FEEDBACK_JOB="1", CARGO_INCREMENTAL="1" if feedback or config["incremental"] == "on" else "0",
                        CARGO_PROFILE_DEV_DEBUG="2" if config["debug"] == "full" else "line-tables-only", CARGO_PROFILE_TEST_DEBUG="2" if config["debug"] == "full" else "line-tables-only")
     compiler = protocol["toolchain"]["msvc"]["compiler"]["path"]
     linker = protocol["toolchain"]["msvc"]["linker"]["path"]

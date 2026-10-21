@@ -501,6 +501,11 @@ otherwise-running jobs. The corrected contract separates the domains.
   declared write cap.
 - `prepare-full --physical-growth-reservation-bytes` makes the distinction
   explicit and defaults to the owned cap for backward compatibility.
+- Measurement Cargo children set `ASG_BUILD_FEEDBACK_JOB=1`. Tests that require
+  breakaway/detached supervisors or purge workers use a separately recorded
+  normal-process preflight; inside the kill-on-close measurement job they emit
+  an explicit preflight-only result. The source snapshot also selects the
+  windows-sys 0.61 dependency-info sidecar rather than a transitive 0.59 rlib.
 
 Verification checkpoint before commit: aggregate 294 tests passed in 496.941
 seconds; Ruff and Mypy passed all 12 build-feedback Python files. Independent
