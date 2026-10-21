@@ -1143,7 +1143,8 @@ class WindowsRecycleBin:
                     # exact $R storage entry. The outer operation was created
                     # from that entry, so reverify its tree through the pinned
                     # storage path when the callback exposes only the display.
-                    observed_path = Path(expected_path)
+                    observed_path = (Path(expected_path) if parsing_relative == "."
+                                     else Path(expected_path) / Path(parsing_relative))
                 matches = [entry for entry in expected_tree["entries"]
                            if entry.get("relative") == parsing_relative]
                 _need(len(matches) == 1,
