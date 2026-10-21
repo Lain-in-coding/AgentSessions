@@ -128,6 +128,14 @@ def bounded_fields(fields, *, phase="capacity"):
     source_roots = [fields["source_root"], *[entry[arm + "_source_root"] for entry in fields["allocations"] for arm in ("baseline", "candidate")]]
     if phase == "capacity":
         source_roots.append(fields["capacity_probe"]["source_root"])
+    scratch_paths = []
+    if phase == "pilot":
+        for entry in fields["allocations"]:
+            for arm in ("baseline", "candidate"):
+                scratch_paths.append(str(Path(entry[arm + "_source_root"]) / "evidence-output" / "build-feedback" / f"asg-build-feedback-pilot-{entry['pair_index']}-{entry['attempt']}-{arm}" / "scratch"))
+    elif phase == "capacity" and fields["capacity_probe"].get("kind") == "full-arm-and-qualification":
+        arm = fields["capacity_probe"]["arm"]
+        scratch_paths.append(str(Path(fields["capacity_probe"]["source_root"]) / "evidence-output" / "build-feedback" / f"asg-build-feedback-capacity-capacity-0-{arm}" / "scratch"))
     source_receipt = RUNNER._read_json(Path(fields["source_receipt_path"]))
     approval = root / "retention-approval.json"
     write_json(approval, {"schema_version": 2, "kind": "build-feedback-retention-approval", "approved": True,
@@ -141,6 +149,7 @@ def bounded_fields(fields, *, phase="capacity"):
                          "checker": {"path": str(checker), "sha256": RUNNER.sha256_file(checker), "bytes": checker.stat().st_size},
                          "verification_tools": tools, "protected_roots": [source_receipt["live_source"], *source_roots],
                          "allowed_source_roots": source_roots, "allow_recent_new_outputs": True,
+                         "producer_owned_scratch_cleanup_paths": sorted(scratch_paths),
                          "local_integrity_key": {"path": str(key), "sha256": RUNNER.sha256_file(key), "bytes": 32},
                          "protected": ["source", "git-common-directory", "daily-cache", "existing-last-72-hours", "stores", "seeds", "quality-source-failures", "unrelated-recycle-items", "pagefile"]})
     fields["retention_policy"] = {"mode": "sealed-verified-recycle", "approval": {"path": str(approval), "sha256": RUNNER.sha256_file(approval)}}

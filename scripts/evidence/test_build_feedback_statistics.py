@@ -1784,7 +1784,10 @@ class ProducerEvidenceIntegrationTests(unittest.TestCase):
                 "scope": "validated-successful-and-cap-stopped-task-intermediates", "flow": ["verify", "recycle", "match", "purge-exact", "verify-release", "receipt"],
                 "protected": ["source", "git-common-directory", "daily-cache", "existing-last-72-hours", "stores", "seeds", "quality-source-failures", "unrelated-recycle-items", "pagefile"],
                 "allow_recent_new_outputs": True, "checker": {"path": str(checker), "sha256": runner.sha256_file(checker), "bytes": checker.stat().st_size},
-                "verification_tools": tools, "local_integrity_key": {"path": str(key), "sha256": runner.sha256_file(key), "bytes": 32}}
+                "verification_tools": tools, "local_integrity_key": {"path": str(key), "sha256": runner.sha256_file(key), "bytes": 32},
+                "producer_owned_scratch_cleanup_paths": sorted(
+                    str(Path(entry["release_suite_root"]) / "scratch")
+                    for entry in protocol["qualification_allocations"])}
             protocol["retention_policy"] = {"mode": "sealed-verified-recycle", "approval": write_proof(root / "approval.json", approval)}
             sample = {"allocated_bytes": 4096, "disk_free_bytes": 104 * STATS.GIB, "budget": {"allowed": True, "reasons": []}}
             job = SimpleNamespace(account=Mock(return_value={"peak_commit_bytes": 4096}), close=Mock())

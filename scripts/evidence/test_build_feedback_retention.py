@@ -108,7 +108,17 @@ class RetentionContracts(unittest.TestCase):
         self.assertGreater(first["allocated_bytes"], 0)
         binary.write_bytes(b"changed" * 1024)
         self.assertNotEqual(first, RETENTION.tree_manifest(self.target))
-        os.link(binary, self.target / "alias.rmeta")
+        internal_alias = self.target / "alias.rmeta"
+        os.link(binary, internal_alias)
+        # Cargo can publish internally linked aliases. They are safe while
+        # every filesystem link is represented inside this disposable tree.
+        aliases = [entry for entry in RETENTION.tree_manifest(self.target)["entries"]
+                   if entry["identity"] == first["entries"][1]["identity"]]
+        self.assertEqual(len(aliases), 2)
+        self.assertEqual(RETENTION.tree_manifest(self.target)["allocated_bytes"],
+                         first["allocated_bytes"])
+        external_alias = self.root / "external-alias.rmeta"
+        os.link(binary, external_alias)
         with self.assertRaisesRegex(ValueError, "hardlink"):
             RETENTION.tree_manifest(self.target)
 
@@ -437,6 +447,7 @@ class RetentionContracts(unittest.TestCase):
         approval = json.loads(approval_path.read_text())
         approval.update(run_root=self.protocol["run_root"], disposable_target_paths=[str(self.target)],
                         toolchain_sha256=RETENTION._canonical(self.protocol["toolchain"]), configs_sha256=RETENTION._canonical(self.protocol["configs"]))
+        approval["producer_owned_scratch_cleanup_paths"] = [str(suite / "scratch")]
         # Each fixture is freshly admitted after other writers' current bytes.
         for name in approval["verification_tools"]:
             path = RETENTION.MODULE_DIR / ("build_feedback_" + name + ".py")

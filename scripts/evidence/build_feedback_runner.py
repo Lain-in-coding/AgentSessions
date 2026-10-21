@@ -2242,7 +2242,9 @@ def approved_diagnostic_argv(protocol: dict, arm_record: dict, *, approval: dict
     _require(executable.is_absolute() and _inside(executable, target), "diagnostic_requires_arm_artifact")
     artifacts = [artifact for field in ("jobs", "feedback_warm_jobs", "edit_jobs") for capture in arm_record.get(field, [])
                  for selected in capture.get("cargo", {}).get("artifacts", []) for artifact in selected.get("files", [])]
-    matches = [artifact for artifact in artifacts if artifact.get("path") == str(executable)]
+    matches = [artifact for artifact in artifacts
+               if isinstance(artifact.get("path"), str)
+               and Path(artifact["path"]).resolve(strict=False) == executable.resolve(strict=False)]
     _require(bool(matches), "diagnostic_executable_not_cargo_emitted")
     if verify_live:
         verify_artifact_receipt(matches[-1])

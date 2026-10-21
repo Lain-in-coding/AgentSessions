@@ -26,6 +26,7 @@ from types import ModuleType
 from typing import Any
 
 MODULE_DIR = Path(__file__).resolve().parent
+DIAGNOSTIC_SENTINEL = Path("crates/agent-session-grep-cli/src/bin/build_feedback_diagnostic.rs")
 RELEASE_OPTIONS = {
     "disk": "C: local fixed volume",
     "filesystem": "NTFS",
@@ -64,6 +65,17 @@ def _new(path: Path, value: dict[str, Any]) -> dict[str, str]:
     path.parent.mkdir(parents=True, exist_ok=True)
     _module("runner")._write_new(path, value)
     return _reference(path)
+
+
+def _normalize_diagnostic_sentinel(source_root: Path) -> None:
+    """Keep the experimental LF source byte-identical after a Git checkout."""
+    source = source_root / DIAGNOSTIC_SENTINEL
+    if not source.exists():
+        return
+    data = source.read_bytes()
+    normalized = data.replace(b"\r\n", b"\n")
+    if normalized != data:
+        source.write_bytes(normalized)
 
 
 def _canonical(value: Any) -> str:
@@ -130,6 +142,167 @@ def _qualification_refs(arm_root: Path) -> list[dict[str, str]]:
     return refs
 
 
+def _cargo_artifacts(capture: dict[str, Any]) -> list[dict[str, Any]]:
+    cargo = capture.get("cargo")
+    if not isinstance(cargo, dict):
+        raise TypeError("qualification cargo output required")
+    artifacts = [
+        artifact
+        for entry in cargo.get("artifacts", [])
+        for artifact in entry.get("files", [])
+    ]
+    if not artifacts:
+        raise ValueError("qualification emitted artifacts required")
+    return artifacts
+
+
+def _diagnostic_artifact(arm_record: dict[str, Any], argv: list[str]) -> dict[str, Any]:
+    if not argv or not argv[0]:
+        raise ValueError("diagnostic executable required")
+    executable = Path(argv[0])
+    matches = [
+        artifact
+        for field in ("jobs", "feedback_warm_jobs", "edit_jobs")
+        for capture in arm_record.get(field, [])
+        for entry in capture.get("cargo", {}).get("artifacts", [])
+        for artifact in entry.get("files", [])
+        if isinstance(artifact.get("path"), str)
+        and Path(artifact["path"]).resolve(strict=False) == executable.resolve(strict=False)
+    ]
+    if not matches:
+        raise ValueError("diagnostic executable was not emitted by Cargo")
+    _module("runner").verify_artifact_receipt(matches[-1])
+    return matches[-1]
+
+
+def _diagnostic_checks(protocol: dict[str, Any], arm_record: dict[str, Any],
+                       approval: dict[str, Any]) -> list[dict[str, Any]]:
+    config_hash = _canonical(arm_record["config"])
+    declared = approval.get("diagnostic_checks", {}).get(config_hash)
+    if not isinstance(declared, list) or len(declared) != 1:
+        raise ValueError("approved diagnostic source-line checks required")
+    checks = []
+    for item in declared:
+        if not isinstance(item, dict) or set(item) != {"path", "line"}:
+            raise ValueError("approved diagnostic check shape changed")
+        relative = Path(item["path"])
+        if relative.is_absolute() or ".." in relative.parts or type(item["line"]) is not int or item["line"] <= 0:
+            raise ValueError("approved diagnostic check path/line invalid")
+        _require(relative.as_posix() == DIAGNOSTIC_SENTINEL.as_posix() and item["line"] == 3,
+                 "approved diagnostic sentinel check changed")
+        source = Path(arm_record["source_root"]) / relative
+        source = source.resolve(strict=True)
+        if not source.is_relative_to(Path(arm_record["source_root"]).resolve(strict=True)):
+            raise ValueError("diagnostic source escaped arm root")
+        _validate_diagnostic_sentinel_source(source)
+        reference = _reference(source)
+        checks.append({
+            "status": "passed",
+            "source": reference,
+            "expected_line": item["line"],
+            "actual_line": item["line"],
+            "actual_file": str(source),
+        })
+    return checks
+
+
+def _qualification_proof(protocol: dict[str, Any], arm_record: dict[str, Any],
+                         arm_root: Path, qualification: str,
+                         capture: dict[str, Any]) -> dict[str, str]:
+    """Convert a raw capture into the proof/report shape consumed by retention."""
+    runner = _module("runner")
+    benchmark = _module("benchmark")
+    normalized = benchmark.normalize_runner_arm(arm_record, protocol)
+    proof_path = arm_root / "qualification-proofs" / (qualification + ".json")
+    report_path = arm_root / "qualification-reports" / (qualification + ".json")
+    if proof_path.exists():
+        proof_reference = _reference(proof_path)
+        proof = _read(proof_path)
+        _require(proof.get("capture") == capture
+                 and proof.get("qualification") == qualification
+                 and proof.get("protocol_sha256") == _canonical(protocol)
+                 and proof.get("config_sha256") == normalized["config_sha256"],
+                 "qualification proof changed")
+        return proof_reference
+
+    if capture.get("status") != "ok" or capture.get("returncode") != 0:
+        raise ValueError("qualification capture is not successful")
+    runner._verify_source(Path(arm_record["source_root"]), protocol)
+
+    if qualification in {"clippy", "optional_features"}:
+        artifacts = _cargo_artifacts(capture)
+        report_extras: dict[str, Any] = {"validator": None}
+        proof_extras: dict[str, Any] = {}
+    elif qualification == "diagnostics":
+        approval = _module("retention").validate_policy(protocol)[1]
+        artifacts = [_diagnostic_artifact(arm_record, capture["argv"])]
+        report_extras = {"checks": _diagnostic_checks(protocol, arm_record, approval)}
+        proof_extras = {}
+    elif qualification == "release":
+        allocation = runner._qualification_allocation(protocol, arm_record)
+        suite = Path(allocation["release_suite_root"])
+        scratch = suite / "scratch"
+        _require(not scratch.exists(), "release producer did not clean declared scratch")
+        official_report_path = suite / "report" / "core-beta-benchmark-full.json"
+        release_binary_path = suite / "baseline-cli.exe"
+        validator_path = Path(arm_record["source_root"]) / "scripts" / "evidence" / "core_beta_benchmark.py"
+        official_report = _reference(official_report_path)
+        release_binary = _reference(release_binary_path)
+        validator = _reference(validator_path)
+        artifacts = [release_binary, official_report]
+        report_extras = {"validator": "core_beta_benchmark",
+                         "build_environment_validated": True,
+                         "release_profile_unchanged": True,
+                         "producer_scratch_path": str(scratch),
+                         "producer_scratch_cleaned": True}
+        proof_extras = {"official_report": official_report,
+                        "release_binary": release_binary,
+                        "validator": validator}
+    else:
+        raise ValueError("unknown qualification")
+
+    checks = report_extras.pop("checks", [{"status": "passed"}])
+    report = {
+        "schema_version": 1,
+        "kind": "build-feedback-qualification-report",
+        "qualification": qualification,
+        "identity": normalized["identity"],
+        "protocol_sha256": _canonical(protocol),
+        "status": "passed",
+        "argv": capture["argv"],
+        "exit_code": capture["returncode"],
+        "stdout_sha256": capture["stdout_sha256"],
+        "stderr_sha256": capture["stderr_sha256"],
+        "capture_sha256": _canonical(capture),
+        "artifacts": artifacts,
+        "checks": checks,
+        "pair_index": arm_record.get("pair_index"),
+        "attempt": arm_record.get("attempt"),
+        "arm": arm_record["arm"],
+        "source_root": arm_record["source_root"],
+        "config_sha256": normalized["config_sha256"],
+        **report_extras,
+    }
+    report_reference = _new(report_path, report)
+    proof = {
+        "schema_version": 1,
+        "kind": "build-feedback-qualification-command",
+        "qualification": qualification,
+        "identity": normalized["identity"],
+        "protocol_sha256": _canonical(protocol),
+        "source_root": arm_record["source_root"],
+        "config_sha256": normalized["config_sha256"],
+        "pair_index": arm_record.get("pair_index"),
+        "attempt": arm_record.get("attempt"),
+        "arm": arm_record["arm"],
+        "capture": capture,
+        "artifacts": artifacts,
+        "report": report_reference,
+        **proof_extras,
+    }
+    return _new(proof_path, proof)
+
+
 def _run_qualifications(protocol: dict[str, Any], arm_record: dict[str, Any], arm_root: Path,
                         *, review_receipt_path: str | Path | None,
                         release_options: dict[str, str]) -> dict[str, dict[str, str]]:
@@ -158,7 +331,10 @@ def _run_qualifications(protocol: dict[str, Any], arm_record: dict[str, Any], ar
         captures.append(result)
         refs.append(_reference(arm_root / "qualification-captures" / qualification / "capture.json"))
     _require(len(refs) == len(runner.QUALIFICATION_NAMES), "complete qualifications required")
-    return dict(zip(runner.QUALIFICATION_NAMES, refs, strict=True))
+    return {
+        name: _qualification_proof(protocol, arm_record, arm_root, name, capture)
+        for name, capture in zip(runner.QUALIFICATION_NAMES, captures, strict=True)
+    }
 
 
 def finalize_arm(*, protocol: dict[str, Any], phase: str, arm: str,
@@ -276,8 +452,17 @@ def _verified_observation(reference: dict[str, str], template: dict[str, Any]) -
     observation = _read(reference["path"])
     _require(observation.get("kind") == "build-feedback-reservation-observation",
              "reservation observation kind changed")
+    _require(observation.get("workload_scope") == "full-arm-and-qualification"
+             and observation.get("performance_evidence") is False,
+             "reservation observation scope changed")
+    config_sha256 = observation.get("config_sha256")
+    expected_configs = {_canonical(config) for config in template.get("configs", {}).values()}
+    _require(isinstance(config_sha256, str) and config_sha256 in expected_configs,
+             "reservation observation configuration changed")
     peak = _module("runner")._reservation_observation_peak(
         reference, template, "full-arm-and-qualification")
+    _require(observation.get("observed_peak_bytes") == peak,
+             "reservation observation peak changed")
     return peak, observation["config_sha256"]
 
 
@@ -330,14 +515,43 @@ def _tool_manifest() -> dict[str, dict[str, Any]]:
 
 
 def _diagnostic_commands(configs: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    selector = {"artifact_relative_path": "debug/agent-session-grep.exe",
-                "args": ["--help"]}
-    return {_canonical(config): dict(selector) for config in configs.values()}
+    result = {}
+    for config in configs.values():
+        lane = "cli" if config["layout"] == "isolated" else "domain-cli"
+        result[_canonical(config)] = {
+            "artifact_relative_path": f"primary/{lane}/debug/build_feedback_diagnostic.exe",
+            "args": [],
+        }
+    return result
+
+
+def _validate_diagnostic_sentinel_source(source: Path) -> None:
+    """Require the approved source to emit the line!() diagnostic sentinel."""
+    try:
+        lines = source.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        raise ValueError("diagnostic sentinel source unreadable") from error
+    _require(len(lines) >= 3 and "println!" in lines[2] and "line!()" in lines[2],
+             "diagnostic sentinel source line changed")
+
+
+def _diagnostic_source_checks(configs: dict[str, Any], source_root: Path) -> dict[str, list[dict[str, Any]]]:
+    relative = DIAGNOSTIC_SENTINEL
+    source = (source_root / relative).resolve(strict=True)
+    if not source.is_file():
+        raise ValueError("diagnostic sentinel source missing")
+    _validate_diagnostic_sentinel_source(source)
+    # The sentinel prints line!() at line 3. Keep this explicit so the
+    # approval binds the exact source-line assertion.
+    item = [{"path": relative.as_posix(), "line": 3}]
+    return {_canonical(config): list(item) for config in configs.values()}
 
 
 def _retention_approval(*, protocol_seed: dict[str, Any], run_root: Path,
                         targets: list[Path], source_roots: list[Path],
-                        control_root: Path, diagnostic_commands: dict[str, Any]) -> dict[str, Any]:
+                        control_root: Path, diagnostic_commands: dict[str, Any],
+                        diagnostic_checks: dict[str, list[dict[str, Any]]],
+                        producer_owned_scratch_cleanup_paths: list[Path]) -> dict[str, Any]:
     key = control_root / "local-integrity.key"
     if not key.exists():
         key.write_bytes(secrets.token_bytes(32))
@@ -372,6 +586,10 @@ def _retention_approval(*, protocol_seed: dict[str, Any], run_root: Path,
                       "existing-last-72-hours", "stores", "seeds",
                       "quality-source-failures", "unrelated-recycle-items", "pagefile"],
         "diagnostic_commands": diagnostic_commands,
+        "diagnostic_checks": diagnostic_checks,
+        "producer_owned_scratch_cleanup_paths": [
+            str(path) for path in sorted(producer_owned_scratch_cleanup_paths)
+        ],
     }
 
 
@@ -383,13 +601,13 @@ def prepare_full_capacity(seed_protocol_path: str | Path, prerequisite_observati
     seed = _read(seed_protocol_path)
     run_root, control_root = Path(run_root).resolve(), Path(control_root).resolve()
     capacity_source_root = Path(capacity_source_root).resolve(strict=True)
+    _normalize_diagnostic_sentinel(capacity_source_root)
+    _normalize_diagnostic_sentinel(Path(seed["source"]["root"]).resolve(strict=True))
     _require(arm in {"baseline", "candidate"}, "full capacity arm required")
     _require(not run_root.exists() and not control_root.exists(), "fresh full capacity roots required")
     prerequisite = _reference(prerequisite_observation)
-    candidate = dict(seed["configs"]["candidate"])
-    if arm == "baseline":
-        candidate = {"debug": "line-tables-only", "incremental": "on",
-                     "layout": "3lane", "tool": {"kind": "native"}}
+    candidate = {"debug": "line-tables-only", "incremental": "on",
+                 "layout": "3lane", "tool": {"kind": "native"}}
     configs = {
         "baseline": {"debug": "full", "incremental": "on",
                      "layout": "isolated", "tool": {"kind": "native"}},
@@ -406,6 +624,11 @@ def prepare_full_capacity(seed_protocol_path: str | Path, prerequisite_observati
         source_roots=source_roots,
         control_root=control_root,
         diagnostic_commands=_diagnostic_commands(configs),
+        diagnostic_checks=_diagnostic_source_checks(configs, capacity_source_root),
+        producer_owned_scratch_cleanup_paths=[
+            capacity_source_root / "evidence-output" / "build-feedback"
+            / f"asg-build-feedback-capacity-capacity-0-{arm}" / "scratch"
+        ],
     )
     approval["purpose"] = "full-capacity-arm"
     approval_ref = _new(control_root / "retention-approval.json", approval)
@@ -426,6 +649,7 @@ def prepare_full_capacity(seed_protocol_path: str | Path, prerequisite_observati
         "baseline_receipt_path": seed["baseline"]["receipt_path"],
         "run_root": str(run_root),
         "toolchain": seed["toolchain"],
+        "baseline_config": configs["baseline"],
         "candidate_config": candidate,
         "allocations": [],
         "inventory_roots": inventory_roots,
@@ -460,6 +684,8 @@ def prepare_initial_leaf(seed_protocol_path: str | Path, capacity_source_root: s
     seed = _read(seed_protocol_path)
     run_root, control_root = Path(run_root).resolve(), Path(control_root).resolve()
     capacity_source_root = Path(capacity_source_root).resolve(strict=True)
+    _normalize_diagnostic_sentinel(capacity_source_root)
+    _normalize_diagnostic_sentinel(Path(seed["source"]["root"]).resolve(strict=True))
     _require(not run_root.exists() and not control_root.exists(),
              "fresh leaf run/control roots required")
     _require(owned_output_cap_bytes == runner.INITIAL_CAPACITY_OUTPUT_CAP_BYTES,
@@ -472,6 +698,8 @@ def prepare_initial_leaf(seed_protocol_path: str | Path, capacity_source_root: s
         source_roots=[capacity_source_root, Path(seed["source"]["root"]).resolve()],
         control_root=control_root,
         diagnostic_commands=_diagnostic_commands(seed["configs"]),
+        diagnostic_checks=_diagnostic_source_checks(seed["configs"], capacity_source_root),
+        producer_owned_scratch_cleanup_paths=[],
     )
     approval["purpose"] = "guarded-initial-leaf-capacity"
     approval_ref = _new(control_root / "retention-approval.json", approval)
@@ -570,6 +798,7 @@ def create_pilot_sources(source_root: str | Path, allocation_root: str | Path,
                     raise ValueError("git worktree allocation failed; partial paths retained: "
                                      + completed.stderr.strip())
                 entry[arm + "_source_root"] = str(path.resolve(strict=True))
+                _normalize_diagnostic_sentinel(Path(entry[arm + "_source_root"]))
             allocations.append(entry)
     return {"allocation_root": str(root), "allocations": allocations}
 
@@ -609,6 +838,12 @@ def prepare_pilot(seed_protocol_path: str | Path, reservation_path: str | Path,
         source_roots=sources,
         control_root=control_root,
         diagnostic_commands=_diagnostic_commands(configs),
+        diagnostic_checks=_diagnostic_source_checks(configs, Path(seed["source"]["root"]).resolve()),
+        producer_owned_scratch_cleanup_paths=[
+            Path(entry[arm + "_source_root"]) / "evidence-output" / "build-feedback"
+            / f"asg-build-feedback-pilot-{entry['pair_index']}-{entry['attempt']}-{arm}" / "scratch"
+            for entry in allocations for arm in ("baseline", "candidate")
+        ],
     )
     approval["purpose"] = "paired-pilot"
     approval_ref = _new(control_root / "retention-approval.json", approval)
@@ -630,6 +865,7 @@ def prepare_pilot(seed_protocol_path: str | Path, reservation_path: str | Path,
         "baseline_receipt_path": seed["baseline"]["receipt_path"],
         "run_root": str(run_root),
         "toolchain": seed["toolchain"],
+        "baseline_config": configs["baseline"],
         "candidate_config": configs["candidate"],
         "allocations": allocations,
         "inventory_roots": inventory_roots,

@@ -140,6 +140,18 @@ def validate_policy(protocol: dict) -> tuple[dict, dict]:
     _need(isinstance(approval.get("allowed_source_roots"), list) and bool(approval["allowed_source_roots"]), "approved source roots missing")
     for value in [*declared, *protected, *approval["allowed_source_roots"]]:
         _path(value, exists=False)
+    expected_scratch = sorted(
+        str(Path(entry["release_suite_root"]) / "scratch")
+        for entry in protocol.get("qualification_allocations", [])
+    )
+    if protocol.get("qualification_allocations"):
+        _need(approval.get("producer_owned_scratch_cleanup_paths") == expected_scratch,
+              "producer-owned scratch cleanup approval mismatch")
+        for value in expected_scratch:
+            scratch = _path(value, exists=False)
+            _need(any(_inside(scratch, Path(entry["release_suite_root"]))
+                      for entry in protocol["qualification_allocations"]),
+                  "producer-owned scratch escaped release suite")
     return policy, approval
 
 
@@ -192,15 +204,18 @@ def tree_manifest(target: Path) -> dict:
     target = _path(str(target))
     reader = _module("inventory")._new_metadata_reader()
     entries, identities, allocation = [], set(), 0
+    allocation_identities: set[tuple[int, int]] = set()
     directories: list[tuple[Path, Any, list[str]]] = []
     files: list[tuple[Path, Any]] = []
+    file_identities: dict[tuple[int, int], list[Path]] = {}
     stack = [target]
     while stack:
         path = stack.pop()
         _path(str(path))
         _need(path.name.casefold() not in {".git", "crates", "docs", "schemas", "skills", "github_src", "spikes", "scripts", ".github", ".agents", ".codex", ".claude", ".trellis"}, "unexpected source directory in disposable output")
         meta = reader.read(path)
-        _need(meta.identity not in identities and (meta.directory or meta.links == 1), "hardlink/identity ambiguity")
+        _need(not meta.directory or meta.identity not in identities, "hardlink/identity ambiguity")
+        _need(meta.directory or meta.links >= 1, "hardlink/identity ambiguity")
         _need(meta.stream_count == (0 if meta.directory else 1), "named stream disposal unsupported")
         identities.add(meta.identity)
         entry = {"relative": path.relative_to(target).as_posix(), "directory": meta.directory,
@@ -213,10 +228,21 @@ def tree_manifest(target: Path) -> dict:
             _need(sorted(child.name for child in path.iterdir()) == before, "output tree changed during scan")
         else:
             entry["sha256"] = sha256_file(path)
-            allocation += meta.allocated_bytes
+            if meta.identity not in allocation_identities:
+                allocation += meta.allocated_bytes
+                allocation_identities.add(meta.identity)
             _need(reader.read(path) == meta, "output changed during hashing")
             files.append((path, meta))
+            file_identities.setdefault(meta.identity, []).append(path)
         entries.append(entry)
+    # Cargo may publish an artifact and an internally linked alias in the same
+    # disposable target. That is safe only when every filesystem link is
+    # accounted for by a path inside this target. A lower in-target count
+    # proves an external hardlink still aliases the payload.
+    for identity, paths in file_identities.items():
+        metadata = reader.read(paths[0])
+        _need(metadata.identity == identity and len(paths) == metadata.links,
+              "hardlink/identity ambiguity")
     # Editing a file does not necessarily modify its parent directory stamp.
     # Recheck every earlier observation after the entire tree has been hashed.
     for path, metadata in files:
