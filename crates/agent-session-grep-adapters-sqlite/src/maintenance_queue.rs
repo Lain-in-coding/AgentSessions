@@ -59,7 +59,10 @@ impl SqliteMaintenanceQueue {
             Err(error) => return Err(backend(error)),
         }
         let mut conn = Connection::open(&path).map_err(sql_error)?;
-        conn.busy_timeout(Duration::from_secs(2))
+        // Initialization is an explicit serialization point: concurrent first
+        // opens may queue behind the one IMMEDIATE transaction that creates the
+        // schema. Keep this wait longer than the normal per-query busy timeout.
+        conn.busy_timeout(Duration::from_secs(10))
             .map_err(sql_error)?;
         conn.execute_batch("PRAGMA synchronous=FULL")
             .map_err(sql_error)?;
