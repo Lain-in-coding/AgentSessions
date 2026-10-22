@@ -3,11 +3,15 @@ import copy
 import importlib.util
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+
+if os.name != "nt":
+    raise unittest.SkipTest("Windows build-feedback evidence suite")
 
 MODULE_PATH = Path(__file__).with_name("build_feedback_benchmark.py")
 SPEC = importlib.util.spec_from_file_location("build_feedback_benchmark", MODULE_PATH)

@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import ClassVar
 from unittest.mock import patch
 
+if os.name != "nt":
+    raise unittest.SkipTest("Windows build-feedback evidence suite")
+
 MODULE_PATH = Path(__file__).with_name("build_feedback_inventory.py")
 SPEC = importlib.util.spec_from_file_location("build_feedback_inventory_tests", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None

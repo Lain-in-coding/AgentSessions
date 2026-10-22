@@ -15,6 +15,9 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 MODULE_PATH = Path(__file__).with_name("build_feedback_statistics.py")
+if os.name != "nt":
+    raise unittest.SkipTest("Windows build-feedback evidence suite")
+
 SPEC = importlib.util.spec_from_file_location("build_feedback_statistics", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 STATS = importlib.util.module_from_spec(SPEC)

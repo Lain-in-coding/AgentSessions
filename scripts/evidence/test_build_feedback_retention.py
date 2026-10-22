@@ -10,6 +10,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+if os.name != "nt":
+    raise unittest.SkipTest("Windows build-feedback evidence suite")
+
 SPEC = importlib.util.spec_from_file_location("build_feedback_retention_tests", Path(__file__).with_name("build_feedback_retention.py"))
 assert SPEC is not None and SPEC.loader is not None
 RETENTION = importlib.util.module_from_spec(SPEC)
