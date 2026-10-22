@@ -1536,6 +1536,7 @@ class FullQualificationCaptureTests(unittest.TestCase):
         arm["jobs"][0]["resource_samples"][0]["allocated_bytes"] = 16 * RUNNER.GIB
         write_json(Path(arm["target_root"]).parent / "arm.json", arm)
         with patch.object(RUNNER, "_retention_module", return_value=SimpleNamespace(validate_policy=lambda approved: ({}, {}))), \
+             patch.object(RUNNER, "_budget_sample", return_value={"allocated_bytes": 0, "disk_free_bytes": 100 * RUNNER.GIB, "budget": {"allowed": True}}), \
              patch.object(RUNNER, "WindowsJob", side_effect=AssertionError("physical overrun cannot launch")), \
              self.assertRaisesRegex(RUNNER.ProtocolError, "physical_reservation_exceeded"):
             RUNNER.capture_qualification(protocol, arm, "clippy")
