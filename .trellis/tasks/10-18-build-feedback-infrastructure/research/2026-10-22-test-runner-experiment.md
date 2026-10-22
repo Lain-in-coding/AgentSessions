@@ -5,7 +5,8 @@
 - Platform: Windows / x86_64-pc-windows-msvc
 - Toolchain: Cargo/Rust `1.97.1`
 - Candidate runner: `cargo-nextest 0.9.149`
-- Decision: local opt-in for fixed eight-thread nextest; keep native Cargo in CI
+- Decision: fixed eight-thread nextest is the stable local default when installed;
+  Windows CI uses it, while Linux/macOS CI remain native pending hosted evidence
 
 ## Question
 
@@ -70,19 +71,25 @@ machine-derived default.
 ## Workflow decision
 
 `scripts/dev/verify.ps1` supports package tests with `-Test` and uses a valid
-cargo-nextest `0.9.149` or newer when it is explicitly available through
-`-NextestPath`, `ASG_NEXTEST`, `PATH`, or the current checkout's
-`.trellis/.runtime/nextest-*/bin/cargo-nextest.exe` and
-`.trellis/.runtime/*/nextest-*/bin/cargo-nextest.exe`. Automatic candidates choose
-the highest valid version. Explicit invalid paths/versions and automatic
-candidate sets with no usable version fail rather than silently falling back;
-native tests are used only when no candidate exists. `-NativeTests` remains the
-explicit bypass. Nextest runs with eight test threads and four build jobs, then
-Cargo runs doctests separately.
+cargo-nextest `0.9.149` or newer. Explicit selection through `-NextestPath` or
+`ASG_NEXTEST` takes precedence. Automatic discovery checks the stable
+`%LOCALAPPDATA%\ASG\tools\nextest` root, `PATH`, and current-checkout
+`.trellis/.runtime` candidates, choosing the highest valid version and preferring
+the user-local install at an equal version. Invalid explicit paths/versions and
+automatic candidate sets with no usable version fail rather than silently
+falling back; native tests are used only when no candidate exists. `-NativeTests`
+remains the explicit bypass. Nextest runs with eight test threads and four build
+jobs, then Cargo runs doctests separately.
 
-The runner remains local opt-in: the script never installs it, changes `PATH`,
-or edits global Cargo configuration. CI keeps native Cargo tests because this
-experiment measured one local Windows machine, not a hosted CI runner.
+The runner is now the stable local default when installed, rather than an
+experimental opt-in. `scripts/dev/install-nextest.ps1` pins the Windows x86_64
+`cargo-nextest 0.9.149` release archive to SHA-256
+`bf904b85c7c5c2a29c340053a8d9d8e8027ff0d55a2bf7cef7d23032f8166438`, verifies
+the extracted version and host, and installs under
+`%LOCALAPPDATA%\ASG\tools\nextest\nextest-0.9.149` without changing `PATH` or
+global Cargo configuration. The Windows CI test matrix applies the measured t8
+path through an isolated installer root and then runs workspace doctests. Linux
+and macOS CI remain native pending hosted evidence on those platforms.
 
 ## Evidence
 
@@ -95,11 +102,28 @@ experiment measured one local Windows machine, not a hosted CI runner.
 ## Limitations
 
 The result is Windows-local and used a warm target. It supports the fixed
-eight-thread local default for this machine, not a cross-platform performance
-claim. A future hosted-run experiment would be required before changing CI.
+eight-thread local default and the Windows CI configuration, but it is not a
+hosted-CI speed claim. Linux and macOS still require their own hosted evidence
+before replacing native Cargo tests.
 
 The first finalist pair was originally captured in the console but not written
 to a standalone JSON receipt. Its preserved log timestamps corroborate the two
 Stopwatch values to within 0.04 seconds: 103.094s versus 103.130s for native and
 72.242s versus 72.256s for nextest-t8. The corroboration receipt is retained with
 the other evidence.
+
+## Stable application verification
+
+On 2026-10-22 the Windows x86_64 installer installed and verified
+`cargo-nextest 0.9.149` at the stable user-local root. Its archive digest matched
+`bf904b85c7c5c2a29c340053a8d9d8e8027ff0d55a2bf7cef7d23032f8166438`; the
+installed executable digest was
+`4a9731975449492e2377dfc1d87a04a7a2ba8e4b8c5bda91a35b877ec3992898`. A second
+run verified the manifest, executable digest and version without downloading.
+An isolated `-DestinationRoot` install also passed and was removed afterward.
+
+`verify.ps1 -Package agent-session-grep-domain -Test` selected the stable
+`LOCALAPPDATA/ASG/tools/nextest` candidate over the checkout runtime copy and
+passed 70/70 tests plus package doctests. PowerShell 7 and Windows PowerShell
+5.1 AST/help checks, YAML parsing, workflow contracts and task-context validation
+all passed. A later project-wide verification run passed the full gate: 1978/1978 nextest tests across 75 binaries with 23 skipped, plus every workspace doctest target.

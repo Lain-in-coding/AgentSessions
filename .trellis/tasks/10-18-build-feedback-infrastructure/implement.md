@@ -605,14 +605,15 @@ follow-up. See `research/2026-10-22-mbx-windows-trial-and-safe-cleanup.md`.
 
 ## Local test-runner workflow checkpoint (2026-10-22)
 
-`scripts/dev/verify.ps1` now retains package-check mode and adds
-`-Package <package> -Test`. Test modes use cargo-nextest `0.9.149` or newer when
-explicitly available through `-NextestPath`, `ASG_NEXTEST`, `PATH`, or the
-current checkout's `.trellis/.runtime/nextest-*/bin/cargo-nextest.exe` or
-`.trellis/.runtime/*/nextest-*/bin/cargo-nextest.exe`; automatic candidates
-select the highest valid version. Explicit invalid paths/versions and
-candidate sets with no usable version fail before Cargo runs. Native fallback is
-used only when no candidate exists, and `-NativeTests` is the explicit bypass.
+`scripts/dev/verify.ps1` retains package-check mode and adds
+`-Package <package> -Test`. Test modes use cargo-nextest `0.9.149` or newer.
+Explicit `-NextestPath` and `ASG_NEXTEST` candidates take precedence. Automatic
+discovery checks the stable user-local installer root, `PATH`, and the current
+checkout's `.trellis/.runtime` candidates, selecting the highest valid version
+and preferring the user-local root at the same version. Explicit invalid
+paths/versions and candidate sets with no usable version fail before Cargo runs.
+Native fallback is used only when no candidate exists, and `-NativeTests` is the
+explicit bypass.
 
 Nextest runs with eight test threads, four build jobs and `--no-fail-fast`, then
 native Cargo runs doctests separately for package or workspace mode. Native tests
@@ -624,8 +625,9 @@ nextest-t8 (29.04% faster), and P95 `103.130 s` versus `73.414 s` (28.81%
 lower). The paired median ratio is `0.7133` with bootstrap 95% interval
 `0.7006-0.7470`; discovery is 2001 tests, 23 ignored and 1978 executed. Default
 thread nextest is disqualified by the recorded `WriterBusy("maintenance queue is
-busy")` failure. CI keeps native Cargo tests and now has PR-scoped concurrency
-with cancellation; hosted nextest remains pending a separately authorized run.
+busy")` failure. At the experiment checkpoint CI kept native Cargo tests; the
+stable application below now uses nextest t8 on Windows while Linux and macOS
+remain native pending hosted evidence on those platforms.
 
 Static checks completed for this dispatch: PowerShell 7 and Windows PowerShell
 5.1 AST parse passed; `Get-Help` exposed all five parameters; PyYAML parsed all
@@ -642,3 +644,21 @@ complete serial `scripts/dev/verify.ps1` gate passed format, workspace Clippy,
 doctest target. Independent review confirmed runner discovery, version rejection,
 native fallback, PowerShell 5.1/7 compatibility, PR concurrency, CI gates and
 task-context validity. No code defect required a fix.
+
+## Stable nextest application verification (2026-10-22)
+
+The Windows x86_64 installer is now the stable user-local path for
+`cargo-nextest 0.9.149`. The first install verified the pinned archive SHA-256
+`bf904b85c7c5c2a29c340053a8d9d8e8027ff0d55a2bf7cef7d23032f8166438`, exact
+version, and `x86_64-pc-windows-msvc` host before moving the staged install to
+`%LOCALAPPDATA%\ASG\tools\nextest\nextest-0.9.149`. A second run verified the
+install manifest, executable SHA-256, and version without downloading. A separate
+override-root install also verified and was removed after the test.
+
+`verify.ps1 -Package agent-session-grep-domain -Test` selected
+`LOCALAPPDATA/ASG/tools/nextest` rather than the checkout-local runtime copy,
+ran 70/70 tests with zero skips, and passed the package doctest command. Static
+checks passed under PowerShell 7 and Windows PowerShell 5.1 for AST parsing and
+help parameters; PyYAML parsed all five workflows and the 12 workflow contract
+tests passed; task JSON/JSONL and every referenced task-context file validated.
+The stable-application dispatch did not run the full gate. A later project-wide verification run passed format, workspace Clippy, 1978/1978 nextest tests across 75 binaries with 23 skipped, and every workspace doctest target.

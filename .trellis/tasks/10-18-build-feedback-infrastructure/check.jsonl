@@ -11,4 +11,5 @@
 {"file": "docs/operations/BUILD-VERIFICATION.md", "reason": "Verify operational policy and measured evidence"}
 {"file": ".github/workflows/ci.yml", "reason": "Verify CI split, cache keys, pinned toolchain and gates"}
 {"file": ".trellis/spec/agentsessions-cli/backend/build-verification.md", "reason": "Verify executable build verification contract and cleanup hard stop"}
-{"file": ".trellis/tasks/10-18-build-feedback-infrastructure/research/2026-10-22-test-runner-experiment.md", "reason": "Verify measured runner result, minimum version, explicit-invalid failure behavior and local-only decision against raw receipts."}
+{"file": ".trellis/tasks/10-18-build-feedback-infrastructure/research/2026-10-22-test-runner-experiment.md", "reason": "Verify the stable user-local t8 decision, pinned installer hash/idempotence, Windows CI nextest path and native Linux/macOS boundary."}
+{"file": "scripts/dev/install-nextest.ps1", "reason": "Verify pinned archive and executable integrity, exact Windows MSVC version, safe idempotence, no PATH/global Cargo mutation and override root support."}

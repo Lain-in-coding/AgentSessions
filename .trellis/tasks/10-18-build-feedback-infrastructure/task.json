@@ -33,12 +33,14 @@
     "scripts/evidence/build_feedback_retention.py",
     "scripts/evidence/test_build_feedback_retention.py",
     "scripts/dev/verify.ps1",
+    "scripts/dev/install-nextest.ps1",
+    "AGENTS.md",
     "docs/operations/BUILD-VERIFICATION.md",
     ".trellis/spec/agentsessions-cli/backend/build-verification.md",
     ".github/workflows/ci.yml",
     ".trellis/tasks/10-18-build-feedback-infrastructure/research/2026-10-22-test-runner-experiment.md"
   ],
-  "notes": "Build workflow implemented 2026-10-22: targeted checks plus one serial local gate, CI incremental disabled, toolchain-aware cache keys, and semantic-candle split into a parallel matrix. Isolated MBX 1.26 trial: 25.35% warm P50 gain, but 5.28x physical target+store footprint and 23 path-sensitive verification divergences, so MBX remains opt-in only. Seven audited caches were safely recycled; trial store cleanup bypassed the Recycle Bin, so all further cleanup stopped. No source or evidence was affected; four trial worktrees remain for explicit follow-up. Local nextest trial verified fixed eight-thread nextest for opt-in package/full test modes; package tests passed 70/70 and the full gate passed 1978/1978 with 23 ignored and all doctests (P50 72.072s vs 101.562s, 29.04% faster; P95 73.414s vs 103.130s); default-thread nextest was disqualified by a WriterBusy failure. CI remains native pending a hosted experiment.",
+  "notes": "Build workflow implemented 2026-10-22: targeted checks plus one serial local gate, CI incremental disabled, toolchain-aware cache keys, and semantic-candle split into a parallel matrix. Isolated MBX 1.26 trial: 25.35% warm P50 gain, but 5.28x physical target+store footprint and 23 path-sensitive verification divergences, so MBX remains opt-in only. Seven audited caches were safely recycled; trial store cleanup bypassed the Recycle Bin, so all further cleanup stopped. No source or evidence was affected; four trial worktrees remain for explicit follow-up. Local nextest trial verified fixed eight-thread nextest for package/full test modes; package tests passed 70/70 and the full gate passed 1978/1978 with 23 ignored and all doctests (P50 72.072s vs 101.562s, 29.04% faster; P95 73.414s vs 103.130s); default-thread nextest was disqualified by a WriterBusy failure. The stable user-local installer now supplies nextest on this machine; the Windows CI test matrix uses pinned nextest t8 plus separate doctests, while Linux and macOS remain native pending hosted evidence.",
   "meta": {
     "plan_revision": "2026-10-19-bounded-trial-grill-q1-q5",
     "implementation_state": "local-quick-decision-complete",
@@ -667,12 +669,17 @@
       "ci_toolchain": "1.97.1",
       "semantic_candle_parallel_job": true,
       "package_test_mode": true,
-      "test_runner_selection": "local-nextest-when-available-else-native",
+      "test_runner_selection": "stable-user-local-nextest-when-installed-else-native",
       "nextest_minimum_version": "0.9.149",
       "nextest_test_threads": 8,
       "nextest_doctests_separate": true,
       "pr_concurrency_cancel": true,
-      "ci_test_runner": "native-cargo"
+      "nextest_installer": "scripts/dev/install-nextest.ps1",
+      "nextest_install_root": "%LOCALAPPDATA%\\ASG\\tools\\nextest",
+      "nextest_archive_sha256": "bf904b85c7c5c2a29c340053a8d9d8e8027ff0d55a2bf7cef7d23032f8166438",
+      "ci_windows_test_runner": "nextest-t8-with-separate-doctests",
+      "ci_other_os_test_runner": "native-cargo",
+      "ci_test_runner": "windows-nextest-t8-other-os-native"
     },
     "mbx_windows_trial_20261022": {
       "version": "1.26.0",
@@ -727,8 +734,8 @@
         "test": "agent-session-grep-adapters-sqlite::maintenance_queue concurrent_first_open_is_serialized_inside_initialization_transaction",
         "error": "WriterBusy(\"maintenance queue is busy\")"
       },
-      "decision": "adopt-local-nextest-t8-opt-in",
-      "ci_decision": "keep-native-pending-hosted-run",
+      "decision": "adopt-stable-local-nextest-t8-when-installed",
+      "ci_decision": "windows-nextest-t8-other-os-native-pending-hosted-evidence",
       "actual_package_tests": {
         "tests": 70,
         "passed": 70,
@@ -740,6 +747,29 @@
         "skipped": 23,
         "binaries": 75,
         "doctests_passed": true
+      },
+      "stable_application": {
+        "installer": "scripts/dev/install-nextest.ps1",
+        "install_path": "%LOCALAPPDATA%\\ASG\\tools\\nextest\\nextest-0.9.149\\bin\\cargo-nextest.exe",
+        "archive_sha256": "bf904b85c7c5c2a29c340053a8d9d8e8027ff0d55a2bf7cef7d23032f8166438",
+        "executable_sha256": "4a9731975449492e2377dfc1d87a04a7a2ba8e4b8c5bda91a35b877ec3992898",
+        "idempotent": true,
+        "override_root_verified": true,
+        "selected_origin": "LOCALAPPDATA/ASG/tools/nextest",
+        "package_tests": 70,
+        "package_tests_passed": 70,
+        "powershell_ast_help": ["7", "5.1"],
+        "yaml_parse": true,
+        "workflow_contract_tests": 12,
+        "task_context_valid": true,
+        "full_gate_run": true,
+        "full_gate": {
+          "tests": 1978,
+          "passed": 1978,
+          "skipped": 23,
+          "binaries": 75,
+          "doctests_passed": true
+        }
       },
       "timing_evidence_corroboration": "timing-corroboration.json: first-pair values agree within 0.04s"
     }

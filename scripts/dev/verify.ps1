@@ -9,15 +9,16 @@ package's tests instead.
 
 With no -Package, the script runs the repository integration gate in order:
 format check, workspace Clippy with warnings denied, then workspace tests.
-Test modes use an available cargo-nextest 0.9.149 or newer with eight test
-threads and four build jobs, then run doctests separately with Cargo. If no
-nextest candidate exists, the script falls back to native Cargo tests. Use
--NativeTests to bypass nextest explicitly.
+Test modes use a valid cargo-nextest 0.9.149 or newer with eight test threads
+and four build jobs, then run doctests separately with Cargo. Automatic
+discovery includes the stable user-local install root
+%LOCALAPPDATA%\ASG\tools\nextest. If no candidate exists, the script falls
+back to native Cargo tests. Use -NativeTests to bypass nextest explicitly.
 
 Cargo build parallelism is capped at four jobs by default and can be lowered
 with -Jobs. The script restores the caller's working directory and
-CARGO_BUILD_JOBS value when it exits. It never installs cargo-nextest, changes
-PATH, or modifies global Cargo configuration.
+CARGO_BUILD_JOBS value when it exits. This wrapper never installs
+cargo-nextest, changes PATH, or modifies global Cargo configuration.
 
 .PARAMETER Package
 Optional Cargo package name. Supplying it without -Test selects targeted check
@@ -176,6 +177,7 @@ function Get-NextestIdentity {
         Path = $CandidatePath
         Origin = $Origin
         Version = $null
+        Priority = $null
         Valid = $false
         Detail = ''
     }
@@ -238,6 +240,29 @@ function Get-NextestIdentity {
     return $identity
 }
 
+function Add-NextestCandidate {
+    param(
+        [System.Collections.Generic.List[object]]$Candidates,
+        [hashtable]$SeenPaths,
+        [string]$CandidatePath,
+        [string]$Origin,
+        [int]$Priority
+    )
+
+    if ([string]::IsNullOrWhiteSpace($CandidatePath)) {
+        return
+    }
+    $resolvedPath = [System.IO.Path]::GetFullPath($CandidatePath)
+    if (-not $SeenPaths.ContainsKey($resolvedPath)) {
+        $SeenPaths[$resolvedPath] = $true
+        $Candidates.Add([pscustomobject]@{
+            Path = $resolvedPath
+            Origin = $Origin
+            Priority = $Priority
+        })
+    }
+}
+
 function Resolve-Nextest {
     param(
         [bool]$ExplicitPathWasSet,
@@ -254,8 +279,19 @@ function Resolve-Nextest {
         return Get-NextestIdentity -CandidatePath $environmentPath -Origin 'ASG_NEXTEST' -Explicit $true
     }
 
-    $candidatePaths = @()
+    $candidatePaths = New-Object 'System.Collections.Generic.List[object]'
     $seenPaths = @{}
+
+    $localAppData = [Environment]::GetEnvironmentVariable('LOCALAPPDATA', 'Process')
+    if (-not [string]::IsNullOrWhiteSpace($localAppData)) {
+        $userInstallRoot = Join-Path $localAppData 'ASG/tools/nextest'
+        if (Test-Path -LiteralPath $userInstallRoot -PathType Container) {
+            $userInstallDirectories = @(Get-ChildItem -LiteralPath $userInstallRoot -Directory -Filter 'nextest-*' -ErrorAction SilentlyContinue)
+            foreach ($userInstallDirectory in $userInstallDirectories) {
+                Add-NextestCandidate -Candidates $candidatePaths -SeenPaths $seenPaths -CandidatePath (Join-Path $userInstallDirectory.FullName 'bin/cargo-nextest.exe') -Origin 'LOCALAPPDATA/ASG/tools/nextest' -Priority 0
+            }
+        }
+    }
 
     $pathCommands = @(Get-Command -Name cargo-nextest -CommandType Application -All -ErrorAction SilentlyContinue)
     foreach ($pathCommand in $pathCommands) {
@@ -263,16 +299,7 @@ function Resolve-Nextest {
         if ([string]::IsNullOrWhiteSpace($candidatePath)) {
             $candidatePath = [string]$pathCommand.Path
         }
-        if (-not [string]::IsNullOrWhiteSpace($candidatePath)) {
-            $resolvedPath = [System.IO.Path]::GetFullPath($candidatePath)
-            if (-not $seenPaths.ContainsKey($resolvedPath)) {
-                $seenPaths[$resolvedPath] = $true
-                $candidatePaths += [pscustomobject]@{
-                    Path = $resolvedPath
-                    Origin = 'PATH'
-                }
-            }
-        }
+        Add-NextestCandidate -Candidates $candidatePaths -SeenPaths $seenPaths -CandidatePath $candidatePath -Origin 'PATH' -Priority 1
     }
 
     $runtimeRoot = Join-Path $RepositoryRoot '.trellis/.runtime'
@@ -287,17 +314,7 @@ function Resolve-Nextest {
 
         $runtimeDirectories = @($runtimeDirectories | Sort-Object -Property FullName -Unique)
         foreach ($runtimeDirectory in $runtimeDirectories) {
-            $candidatePath = Join-Path $runtimeDirectory.FullName 'bin/cargo-nextest.exe'
-            if (Test-Path -LiteralPath $candidatePath -PathType Leaf) {
-                $resolvedPath = [System.IO.Path]::GetFullPath($candidatePath)
-                if (-not $seenPaths.ContainsKey($resolvedPath)) {
-                    $seenPaths[$resolvedPath] = $true
-                    $candidatePaths += [pscustomobject]@{
-                        Path = $resolvedPath
-                        Origin = '.trellis/.runtime'
-                    }
-                }
-            }
+            Add-NextestCandidate -Candidates $candidatePaths -SeenPaths $seenPaths -CandidatePath (Join-Path $runtimeDirectory.FullName 'bin/cargo-nextest.exe') -Origin '.trellis/.runtime' -Priority 2
         }
     }
 
@@ -309,6 +326,7 @@ function Resolve-Nextest {
     $invalidCandidates = @()
     foreach ($candidate in $candidatePaths) {
         $identity = Get-NextestIdentity -CandidatePath $candidate.Path -Origin $candidate.Origin -Explicit $false
+        $identity.Priority = $candidate.Priority
         if ($identity.Valid) {
             $validCandidates += $identity
         } else {
@@ -323,7 +341,9 @@ function Resolve-Nextest {
         throw ("cargo-nextest candidates were found, but none is usable. Version {0} or newer is required. {1}" -f $script:minimumNextestVersion, $details)
     }
 
-    return ($validCandidates | Sort-Object -Property Version -Descending | Select-Object -First 1)
+    return ($validCandidates |
+        Sort-Object -Property @{ Expression = { $_.Version }; Descending = $true }, @{ Expression = { $_.Priority }; Descending = $false } |
+        Select-Object -First 1)
 }
 
 function Invoke-NativeTests {

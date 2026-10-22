@@ -54,8 +54,29 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Test
+      - name: Install cargo-nextest (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/dev/install-nextest.ps1 -DestinationRoot "$env:RUNNER_TEMP\asg-tools\nextest"
+
+      - name: Test (native Cargo)
+        if: runner.os != 'Windows'
         run: cargo test --workspace
+
+      - name: Test (Windows, nextest t8)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $nextest = Join-Path $env:RUNNER_TEMP 'asg-tools\nextest\nextest-0.9.149\bin\cargo-nextest.exe'
+          if (-not (Test-Path -LiteralPath $nextest -PathType Leaf)) {
+            throw "cargo-nextest was not installed at $nextest"
+          }
+          & $nextest nextest run --workspace --locked --test-threads 8 --build-jobs 4 --no-fail-fast
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Workspace doctests (Windows nextest)
+        if: runner.os == 'Windows'
+        run: cargo test --workspace --locked --doc -j 4 --no-fail-fast
 
       # The embedded client has no npm dependencies. Node's built-in runner
       # exercises the shipped script against delayed synthetic API responses.

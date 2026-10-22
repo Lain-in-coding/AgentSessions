@@ -37,16 +37,20 @@ pwsh ./scripts/dev/verify.ps1 -Package agent-session-grep-domain -Test -NativeTe
 
 ## Test runner selection
 
-Test modes use `cargo-nextest 0.9.149` or newer when one is explicitly available
-in the current checkout. The wrapper resolves the runner before running Cargo,
-using this order:
+Test modes use a valid `cargo-nextest 0.9.149` or newer. When installed, the
+pinned user-local runner is the stable default. The wrapper resolves the runner
+before running Cargo, using this order:
 
 1. `-NextestPath <path>`;
 2. `ASG_NEXTEST=<path>`;
-3. candidates on `PATH` and under either
-   `.trellis/.runtime/nextest-*/bin/cargo-nextest.exe` or one task-directory
-   level at `.trellis/.runtime/*/nextest-*/bin/cargo-nextest.exe`, choosing the
-   highest valid version.
+3. automatic candidates under
+   `%LOCALAPPDATA%\ASG\tools\nextest\nextest-*\bin\cargo-nextest.exe`,
+   on `PATH`, and under either `.trellis/.runtime/nextest-*/bin/cargo-nextest.exe`
+   or one task-directory level at
+   `.trellis/.runtime/*/nextest-*/bin/cargo-nextest.exe`.
+
+Automatic candidates choose the highest valid version. At the same version, the
+user-local install root wins over `PATH` and checkout-local runtime copies.
 
 An explicit path must exist, report a parseable version, and satisfy the minimum
 version. An invalid explicit path fails instead of falling back. If automatic
@@ -54,8 +58,21 @@ discovery finds candidates but none is usable, the wrapper also fails; native
 fallback happens only when no candidate exists. `-NativeTests` is the explicit
 bypass.
 
-The wrapper never installs nextest, changes `PATH`, or edits global Cargo
-configuration. A local executable can be selected without exposing it globally:
+Install the pinned runner into its user-local default once:
+
+```powershell
+pwsh ./scripts/dev/install-nextest.ps1
+```
+
+The installer verifies the release archive SHA-256, exact `0.9.149` version, and
+Windows x86_64 MSVC host identity before an atomic move into
+`%LOCALAPPDATA%\ASG\tools\nextest\nextest-0.9.149`. A second run verifies the
+install manifest and executable hash instead of downloading again. It never
+changes `PATH` or global Cargo configuration. CI can keep the same versioned
+layout under an isolated root with `-DestinationRoot <path>`.
+
+`verify.ps1` itself never installs nextest. A different local executable can be
+selected without exposing it globally:
 
 ```powershell
 pwsh ./scripts/dev/verify.ps1 -NextestPath C:\tools\cargo-nextest.exe
@@ -109,10 +126,12 @@ wait rather than increase compiler and disk pressure.
 
 ## CI
 
-CI keeps native `cargo test` pending a separately authorized hosted-run
-experiment; it does not install or select nextest. Pull-request workflow groups
-use PR-scoped concurrency and cancel an older in-progress run when a newer run
-for the same PR starts.
+The Windows test matrix installs the same pinned runner through
+`scripts/dev/install-nextest.ps1 -DestinationRoot <runner-temp>`, runs the fixed
+eight-thread nextest workspace suite, and then runs workspace doctests with
+Cargo. Linux and macOS keep native `cargo test` pending hosted-run evidence for
+those platforms. Pull-request workflow groups use PR-scoped concurrency and
+cancel an older in-progress run when a newer run for the same PR starts.
 
 MBX and sccache are not defaults. Use them only for an explicitly scoped
 measurement with isolated stores and recorded evidence; do not add a wrapper,
@@ -142,8 +161,10 @@ Default-thread nextest was not selected. In its final round,
 concurrent_first_open_is_serialized_inside_initialization_transaction` failed
 with `WriterBusy("maintenance queue is busy")`; that round executed 1978 tests,
 with 1977 passing, one failing, and 23 skipped. The fixed eight-thread candidate
-therefore remains a local opt-in. This is a Windows-local result, not hosted-CI
-evidence or permission to change CI.
+is therefore the stable local default when nextest is installed, and Windows CI
+now applies the same fixed concurrency. This remains a Windows-local performance
+measurement: it does not establish a hosted speedup or justify replacing native
+Cargo tests on Linux and macOS.
 
 ## Measured MBX trial
 

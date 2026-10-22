@@ -4,8 +4,8 @@
 
 ### 1. Scope / Trigger
 Changing local Rust verification commands, Cargo job concurrency, test-runner
-selection, CI cache identity, Rust toolchain selection, or optional build-cache
-tooling. The contract prevents duplicate target-directory fan-out, silent
+selection, the pinned nextest installer, CI cache identity, Rust toolchain
+selection, or optional build-cache tooling. The contract prevents duplicate target-directory fan-out, silent
 runner substitution, stale cache keys and unsafe cache cleanup from becoming the
 default workflow.
 
@@ -13,8 +13,10 @@ default workflow.
 - `pwsh scripts/dev/verify.ps1 -Package <cargo-package> [-Jobs 1..4]`
 - `pwsh scripts/dev/verify.ps1 -Package <cargo-package> -Test [-NativeTests | -NextestPath <path>] [-Jobs 1..4]`
 - `pwsh scripts/dev/verify.ps1 [-NativeTests | -NextestPath <path>] [-Jobs 1..4]`
+- `pwsh scripts/dev/install-nextest.ps1 [-DestinationRoot <path>]`
 - CI jobs: `test`, `semantic-candle`, `installer`, `deny`.
-- Environment: `CARGO_BUILD_JOBS`, `CARGO_INCREMENTAL`, `ASG_NEXTEST`.
+- Environment: `CARGO_BUILD_JOBS`, `CARGO_INCREMENTAL`, `ASG_NEXTEST`,
+  `LOCALAPPDATA`.
 
 ### 3. Contracts
 - Package check mode runs exactly
@@ -37,20 +39,35 @@ default workflow.
 - `-NativeTests` bypasses nextest discovery. `-NextestPath` and `ASG_NEXTEST`
   are explicit candidates and must exist, parse a version, and be
   `0.9.149` or newer; an invalid explicit candidate is an error.
-- Automatic discovery checks `PATH`, top-level
-  `.trellis/.runtime/nextest-*/bin/cargo-nextest.exe`, and one task-directory
-  level at `.trellis/.runtime/*/nextest-*/bin/cargo-nextest.exe`, selecting the
-  highest valid version at or above the minimum. If candidates exist but none is valid,
-  the script fails. Native fallback is allowed only when no candidate exists.
-- The script resolves the repository root from its own path, restores the prior
-  working directory and `CARGO_BUILD_JOBS`, and never installs nextest, changes
-  global `PATH`, or modifies global Cargo configuration.
+- Automatic discovery checks
+  `%LOCALAPPDATA%\ASG\tools\nextest\nextest-*\bin\cargo-nextest.exe`,
+  `PATH`, top-level `.trellis/.runtime/nextest-*/bin/cargo-nextest.exe`, and one
+  task-directory level at
+  `.trellis/.runtime/*/nextest-*/bin/cargo-nextest.exe`. It selects the highest
+  valid version at or above the minimum; at the same version the user-local
+  installer root wins. If candidates exist but none is valid, the script fails.
+  Native fallback is allowed only when no candidate exists.
+- The nextest installer supports Windows x86_64 only and defaults to
+  `%LOCALAPPDATA%\ASG\tools\nextest\nextest-0.9.149\bin\cargo-nextest.exe`.
+  It downloads the pinned `0.9.149` x86_64 MSVC release archive, verifies SHA-256
+  `bf904b85c7c5c2a29c340053a8d9d8e8027ff0d55a2bf7cef7d23032f8166438`, checks
+  the extracted version and host, and moves a complete staged install into
+  place. `-DestinationRoot` overrides only the root. A repeat run validates the
+  install manifest, executable hash, and version. The installer never changes
+  `PATH` or global Cargo configuration and refuses an incomplete or unverified
+  existing target.
+- `verify.ps1` resolves the repository root from its own path, restores the prior
+  working directory and `CARGO_BUILD_JOBS`, and never installs nextest or changes
+  global `PATH` or Cargo configuration.
 - Run one full gate at a time. Independent agent work may use at most three
   concurrent Cargo processes with `-j4` each.
-- CI keeps native Cargo tests until a hosted-run experiment is authorized. It
-  sets `CARGO_INCREMENTAL=0`, explicitly installs Rust `1.97.1`, and binds each
-  target cache key to `Cargo.lock`, `rust-toolchain.toml`, and
-  `.cargo/config.toml`.
+- The Windows test matrix installs the pinned nextest through
+  `scripts/dev/install-nextest.ps1` under `RUNNER_TEMP`, runs
+  `nextest run --workspace --locked --test-threads 8 --build-jobs 4
+  --no-fail-fast`, and then runs workspace Cargo doctests. Linux and macOS keep
+  native `cargo test` pending hosted evidence on those platforms. CI sets
+  `CARGO_INCREMENTAL=0`, explicitly installs Rust `1.97.1`, and binds each target
+  cache key to `Cargo.lock`, `rust-toolchain.toml`, and `.cargo/config.toml`.
 - Pull-request workflow concurrency is scoped to the PR and cancels an older
   in-progress run when a newer run starts.
 - Semantic-candle tests and entrypoint checks run in a separate three-OS matrix
@@ -72,12 +89,15 @@ default workflow.
 - Automatic candidates exist but all are invalid -> explicit error; no native
   fallback.
 - No nextest candidate exists -> native Cargo test fallback.
+- Installer runs off Windows x86_64, receives a file destination root, finds a
+  wrong archive/version/host/hash, or encounters an incomplete existing target
+  -> explicit error with no PATH/global Cargo changes.
 - Repository root cannot be found -> explicit error before Cargo runs.
 - Any Cargo or nextest command returns nonzero -> script throws that command and
   exit code.
 - CI cache key omits lockfile/toolchain/config identity -> invalid workflow.
-- PR concurrency loses cancellation or changes the native test runner -> invalid
-  workflow regression.
+- PR concurrency loses cancellation, Windows stops using pinned nextest t8, or
+  Linux/macOS stop using native Cargo tests -> invalid workflow regression.
 - Semantic-candle remains inside the main matrix -> invalid workflow regression.
 - Recycle source disappears without matching Recycle Bin metadata -> hard stop;
   do not continue cleanup or claim recoverability.
@@ -85,15 +105,19 @@ default workflow.
 ### 5. Good/Base/Bad Cases
 - Good: edit one crate with package check mode; use package-test mode for that
   crate; when the edit set is ready, run one serial full gate.
-- Base: no nextest is installed, so the full gate runs native Cargo tests; an
-  explicit local nextest path is validated before it is used.
+- Base: a user-local pinned nextest is installed and selected; without any
+  candidate the full gate runs native Cargo tests, and an explicit nextest path
+  is validated before it is used.
 - Bad: silently fall back after an explicit invalid path, run nextest without
   doctests, launch several full workspace gates in parallel, cache only the
   lockfile, or use MBX as the default single-checkout build.
 
 ### 6. Tests Required
-- Parse `verify.ps1` under PowerShell 7 and Windows PowerShell 5.1 and inspect
-  its help output.
+- Parse `install-nextest.ps1` and `verify.ps1` under PowerShell 7 and Windows
+  PowerShell 5.1 and inspect their help output.
+- Run the installer twice to prove archive/hash/version verification and
+  idempotence, then assert `verify.ps1` selects the stable user-local path when
+  checkout-local candidates also exist.
 - Run one targeted package check, one package-test mode, and one complete full
   gate after a runner-path change.
 - Exercise nextest discovery, invalid explicit path, pre-`0.9.149` rejection,
@@ -101,8 +125,9 @@ default workflow.
 - Assert `-Jobs 5` is rejected and both the working directory and
   `CARGO_BUILD_JOBS` are restored.
 - Parse CI YAML and assert four jobs, PR-scoped concurrency with cancellation,
-  native Cargo tests, the semantic-candle matrix, incremental disablement,
-  pinned Rust, three cache inputs, retained gates and 40-character action SHAs.
+  Windows pinned nextest t8 plus doctests, Linux/macOS native Cargo tests, the
+  semantic-candle matrix, incremental disablement, pinned Rust, three cache
+  inputs, retained gates and 40-character action SHAs.
 - Validate MBX evidence and cleanup receipts against their raw runtime records.
 - `git diff --check` must pass and no unrelated file may be staged.
 

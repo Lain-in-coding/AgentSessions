@@ -49,6 +49,48 @@ pointer only records the current session's selection. Before creating or
 starting a task, follow `.trellis/workflow.md`, including its consent and
 planning gates.
 
+## Build and verification
+
+Use the repository wrapper instead of bare Cargo test or Clippy commands:
+
+| Situation | Command |
+|---|---|
+| Editing one package | `pwsh ./scripts/dev/verify.ps1 -Package <cargo-package>` |
+| That package's tests | `pwsh ./scripts/dev/verify.ps1 -Package <cargo-package> -Test` |
+| Integration gate | `pwsh ./scripts/dev/verify.ps1` |
+
+The integration gate runs formatting, workspace Clippy with warnings denied, then
+workspace tests and doctests. Cargo build jobs are capped at four.
+
+The pinned user-local `cargo-nextest 0.9.149` is the stable test runner when
+installed. The installer is optional only when no valid nextest candidate is
+available:
+
+```powershell
+pwsh ./scripts/dev/install-nextest.ps1
+```
+
+It writes under `%LOCALAPPDATA%\ASG\tools\nextest` and does not change
+`PATH` or global Cargo configuration. `verify.ps1` discovers that root
+automatically, fixes nextest at eight test threads, and runs Cargo doctests
+separately. Native tests are the fallback only when no nextest candidate exists;
+`-NativeTests` is the explicit bypass. Do not raise the test-thread count without
+repeating the paired performance and correctness experiment.
+
+**Development debug info is minimal on purpose.** `.cargo/config.toml` sets
+`debug = "line-tables-only"` for `[profile.dev]` and `debug = false` for
+dependencies. That is a deliberate ~45% cut in target allocation, not a broken
+or downgraded configuration — do not "restore" it. When a debugger needs local
+variables, build the opt-in profile instead of editing the default:
+
+```text
+cargo build --profile debugging
+```
+
+Details: `docs/operations/CARGO-PROFILE.md`,
+`docs/operations/BUILD-VERIFICATION.md`, and
+`.trellis/spec/agentsessions-cli/backend/build-verification.md`.
+
 ## Authority order
 
 When sources disagree, use this order:

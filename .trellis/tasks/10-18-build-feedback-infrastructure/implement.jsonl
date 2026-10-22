@@ -9,3 +9,5 @@
 {"file": ".trellis/spec/agentsessions-cli/backend/build-verification.md", "reason": "Executable local/CI build verification and opt-in cache-tool contract"}
 {"file": ".trellis/tasks/10-18-build-feedback-infrastructure/research/2026-10-22-test-runner-experiment.md", "reason": "Measured cargo-nextest 0.9.149 t8 decision, doctest inclusion, default-thread WriterBusy disqualification and native-CI boundary."}
 {"file": "scripts/dev/verify.ps1", "reason": "Current package-check/package-test and full-mode runner selection, validation, doctest and restoration contract."}
+{"file": "scripts/dev/install-nextest.ps1", "reason": "Pinned Windows x86_64 cargo-nextest 0.9.149 installer with archive hash, exact version, idempotence and user-local/override roots."}
+{"file": ".github/workflows/ci.yml", "reason": "Windows test matrix installs pinned nextest under RUNNER_TEMP, runs t8 workspace tests plus doctests, and preserves native Linux/macOS and existing gates."}
