@@ -573,3 +573,31 @@ Defender real-time protection is enabled. The exact target path was added as an
 exclusion and verified, but the pre-existing exclusion list already contained
 `C:\`, so this action provides no additional scan coverage or guaranteed speed
 gain.
+
+## Build workflow, MBX trial and cleanup checkpoint (2026-10-22)
+
+The approved local workflow now has a package-scoped edit check and one serial
+integration gate through `scripts/dev/verify.ps1`: format, Clippy, then tests,
+with Cargo build jobs capped at four. `docs/operations/BUILD-VERIFICATION.md`
+records the three-process concurrency ceiling, the fixed Rust 1.97.1 policy and
+the opt-in-only status of MBX/sccache.
+
+CI now sets `CARGO_INCREMENTAL=0`, pins Rust 1.97.1 explicitly, binds target
+cache keys to the lockfile/toolchain/Cargo config, and runs semantic-candle
+tests and entrypoint checks in a separate three-OS matrix job.
+
+The isolated MBX 1.26.0 Windows/NTFS trial completed three native builds, one
+cold seed and three warm new-worktree builds. MBX P50 was 49.679 s versus
+66.554 s (25.35% faster) and nearest-rank P95 was 52.371 s versus 68.271 s.
+However one target plus store used 5.793 GiB versus 1.098 GiB native (5.28x),
+and `MBX_VERIFY=1` reported 23 path-sensitive divergences among 85 verifications.
+MBX remains opt-in for bounded multi-worktree bursts only.
+
+A read-only seven-root inventory completed with zero errors and 33,391,153,336
+allocated bytes. The seven confirmed caches and the MBX trial `targets` directory
+were moved to the Recycle Bin with per-item source-absence and Recycle Bin
+metadata checks. During trial-store cleanup, Windows made the generated `store`
+source disappear without exposing a corresponding Recycle Bin item. Cleanup
+stopped immediately. No source, Git metadata, task evidence, Beta debug cache or
+other user data was affected; the four trial worktrees remain pending explicit
+follow-up. See `research/2026-10-22-mbx-windows-trial-and-safe-cleanup.md`.

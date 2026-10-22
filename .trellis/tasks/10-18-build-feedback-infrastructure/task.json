@@ -33,7 +33,7 @@
     "scripts/evidence/build_feedback_retention.py",
     "scripts/evidence/test_build_feedback_retention.py"
   ],
-  "notes": "Fast local decision completed 2026-10-22: combined line-tables-only + 3lane reduced final target allocation 45.24% with primary wall time +0.03% and warm feedback -8.88%; 24/24 job invocations exited 0. This is a local decision, not a five-pair confidence-bound or project-wide release claim.",
+  "notes": "Build workflow implemented 2026-10-22: targeted checks plus one serial local gate, CI incremental disabled, toolchain-aware cache keys, and semantic-candle split into a parallel matrix. Isolated MBX 1.26 trial: 25.35% warm P50 gain, but 5.28x physical target+store footprint and 23 path-sensitive verification divergences, so MBX remains opt-in only. Seven audited caches were safely recycled; trial store cleanup bypassed the Recycle Bin, so all further cleanup stopped. No source or evidence was affected; four trial worktrees remain for explicit follow-up.",
   "meta": {
     "plan_revision": "2026-10-19-bounded-trial-grill-q1-q5",
     "implementation_state": "local-quick-decision-complete",
@@ -653,6 +653,40 @@
       "preexisting_c_drive_exclusion": true,
       "additional_speed_gain_expected": false,
       "note": "C:\\ was already excluded, so the exact target exclusion is redundant for scan coverage."
+    },
+    "local_workflow_checkpoint_20261022": {
+      "script": "scripts/dev/verify.ps1",
+      "default_jobs": 4,
+      "max_concurrent_cargo_processes": 3,
+      "ci_incremental": false,
+      "ci_toolchain": "1.97.1",
+      "semantic_candle_parallel_job": true
+    },
+    "mbx_windows_trial_20261022": {
+      "version": "1.26.0",
+      "filesystem": "NTFS",
+      "baseline_p50_ms": 66554,
+      "mbx_warm_p50_ms": 49679,
+      "warm_improvement_percent": 25.35,
+      "baseline_p95_ms": 68271,
+      "mbx_warm_p95_ms": 52371,
+      "physical_disk_amplification": 5.28,
+      "verify_divergences": 23,
+      "verify_verifications": 85,
+      "decision": "opt-in-only"
+    },
+    "cleanup_checkpoint_20261022": {
+      "inventory_allocated_bytes": 33391153336,
+      "inventory_complete": true,
+      "recycled_candidate_count": 7,
+      "recycle_metadata_verified_for_candidates": true,
+      "trial_targets_recycled": true,
+      "trial_store_recycle_verified": false,
+      "trial_store_source_absent": true,
+      "incident": "OS bypassed Recycle Bin for generated trial store",
+      "cleanup_stopped": true,
+      "source_or_evidence_affected": false,
+      "trial_worktrees_pending": 4
     }
   }
 }

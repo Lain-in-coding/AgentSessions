@@ -6,3 +6,4 @@
 {"file": "docs/operations/BUILD-FEEDBACK.md", "reason": "Current v2 bounded capacity/retention/provenance contracts and execution limits; v1 80GiB/fixed100 remains preserved. Tool checkpoints are synthetic validation, not measured performance."}
 {"file": "scripts/evidence/build_feedback_coordinator.py", "reason": "Current explicit v2 arm lifecycle, artifact qualification, exact disposal, reservation observation and measured reservation producers."}
 {"file": "scripts/evidence/test_build_feedback_coordinator.py", "reason": "Meaningful fixture authority, duplicate-configuration and insufficient-margin regressions for the v6 coordinator."}
+{"file": ".trellis/spec/agentsessions-cli/backend/build-verification.md", "reason": "Executable local/CI build verification and opt-in cache-tool contract"}

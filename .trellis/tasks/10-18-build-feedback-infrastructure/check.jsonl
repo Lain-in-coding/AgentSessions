@@ -6,3 +6,8 @@
 {"file": "docs/operations/BUILD-FEEDBACK.md", "reason": "Check versioned floors/N, exact native disposal, raw campaign provenance, full-capacity bootstrap and honest measured-versus-checkpoint boundaries against the current operations contract."}
 {"file": "scripts/evidence/build_feedback_coordinator.py", "reason": "Verify every v2 arm is qualified before seal, disposed only through the approved exact lifecycle, and converted to reservation evidence only from both sealed configurations."}
 {"file": "scripts/evidence/test_build_feedback_coordinator.py", "reason": "Verify negative cases reject incomplete fixture authority, duplicate observations and insufficient measured reservation margin."}
+{"file": ".trellis/tasks/10-18-build-feedback-infrastructure/research/2026-10-22-mbx-windows-trial-and-safe-cleanup.md", "reason": "Verify measured MBX opt-in decision and cleanup hard-stop evidence"}
+{"file": "scripts/dev/verify.ps1", "reason": "Verify targeted and serial local gate behavior"}
+{"file": "docs/operations/BUILD-VERIFICATION.md", "reason": "Verify operational policy and measured evidence"}
+{"file": ".github/workflows/ci.yml", "reason": "Verify CI split, cache keys, pinned toolchain and gates"}
+{"file": ".trellis/spec/agentsessions-cli/backend/build-verification.md", "reason": "Verify executable build verification contract and cleanup hard stop"}
