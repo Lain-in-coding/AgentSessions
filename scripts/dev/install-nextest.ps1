@@ -188,7 +188,7 @@ function Invoke-PinnedDownload {
         [string]$OutFile
     )
 
-    $curlCommand = Get-Command -Name curl.exe -CommandType Application -ErrorAction SilentlyContinue
+    $curlCommand = Get-Command -Name curl.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     $curlFailure = $null
     if ($null -ne $curlCommand) {
         & $curlCommand.Source --fail --location --silent --show-error --retry 3 --retry-delay 1 --output $OutFile $Uri
