@@ -54,4 +54,10 @@ jobs:
           fi
 
       - name: Check RustSec advisories
-        run: cargo audit --file Cargo.lock
+        # Keep these exact exceptions aligned with deny.toml. candle-core only
+        # reads archive entries and does not call the vulnerable extraction APIs.
+        run: >-
+          cargo audit --file Cargo.lock
+          --ignore RUSTSEC-2026-0367
+          --ignore RUSTSEC-2026-0368
+          --ignore RUSTSEC-2026-0369

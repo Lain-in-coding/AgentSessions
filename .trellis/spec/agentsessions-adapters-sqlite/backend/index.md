@@ -590,6 +590,143 @@ similarity near 0.40 on unrelated short text, so the default gate rejects zero
 and negative evidence but cannot remove non-zero, non-semantic false hits;
 that requires real embedding weights plus recalibration.
 
+## Scenario: Online journal maintenance and physical reclamation
+
+### 1. Scope / Trigger
+Queue-backed maintenance is separate from the legacy B2 stage/apply interface.
+Keep B2 compatibility and catalog schema 19; queue format is independent v1.
+
+### 2. Signatures
+`maintenance` implements the catalog/session ports. `SqliteMaintenanceQueue`
+implements durable queue operations; `open_existing` is read-only/no-create,
+while explicit enqueue/start may create the queue. Queue lives below the
+existing writer-lease data-root under `.maintenance/queue.sqlite`.
+
+### 3. Contracts
+Validate exactly the persisted selected subset, then write compaction audit,
+aggregate details and commit atomically. No standalone staged record may later
+be applied after this workflow has cancelled. Existing B2 semantics stay intact.
+Open maintenance targets without creation, migration or reprojection. Bind
+canonical path and stable file identity; use original-file VACUUM, never swap
+an online DB. Measure real UTF-8/file bytes, not SQLite TEXT character counts.
+One verified owned pre-maintenance backup is reused. Persist intent before
+copy/publication; recover no-clobber publication gaps by verifying ownership
+and snapshot. Never restore over later writes. Use private job directories,
+space preflight and deadline-aware Backup/progress APIs. No SQLite global
+temp-directory mutation. Check TRUNCATE checkpoint results, not just execution.
+Validate logical invariants immediately after Compact and VACUUM before phase
+acknowledgement; a later checkpoint deferral must not discard the destructive
+acquisition baseline. Cleanup-only recovery after a durable claim needs no
+catalog open or writer lease; post-delete measurement failures remain resumable
+CleanupFailed rather than ordinary failure or false completion.
+Queue initialization uses one transaction; progress CAS preserves concurrent
+cancel and root pause. OS worker/lifecycle locks are separate from writer lease.
+
+### 4. Validation & Error Matrix
+Unknown queue/schema/target identity fails closed. Reader-blocked checkpoint
+is deferred. Integrity failure retains backup. Cleanup failure is not success.
+Never clean paths outside resolved job ownership, even when names look similar.
+
+### 5. Good/Base/Bad Cases
+Good: audit reconciliation avoids duplicate logical compaction after lost ack.
+Base: ambiguous VACUUM acknowledgement can safely repeat physical work.
+Bad: call full-preview stage for a subset and accidentally include new batches.
+
+### 6. Tests Required
+Keep `journal_retention` green. Add isolated storage tests for subset drift,
+atomic rollback, backup publication/adoption, writer budget, checked checkpoint,
+FTS rowid sidecar and logical/generation invariants, ownership cleanup and real
+file reduction. Multiprocess lifecycle evidence belongs at the CLI boundary.
+
+### 7. Wrong vs Correct
+Wrong: claim disk savings from deleted strings or `freelist_count` alone.
+Correct: measure catalog, WAL/SHM, queue and retained backups separately and
+require a reduced total footprint on the controlled fixture.
+
+## Scenario: Changed-sync commit optimization (2026-10-15)
+
+### 1. Scope / Trigger
+These contracts describe the unmerged O1/O2/O4/O6 experiment at S2
+`e8e4975817f71647c158f6d802a7b98cee2f1b15`, not the current main branch.
+Formal performance acceptance failed on shrink; O3/O5/O7 are rejected
+prototypes. Consult the actual checked-out source before applying these sizes
+or helper names. No schema-20 migration was adopted.
+
+Tuning source-batch validation, affected-session collection, bulk SQL or durable
+manifest construction. Schema remains 19; catalog/outbox/CAS semantics remain
+the authority even when allocation and SQL batching change.
+
+### 2. Signatures
+`commit_source_batches_if_changed` validates each source entry before no-op.
+`collect_message_sessions` receives the deduplicated union of touched Message
+IDs. `RelationManifests::canonical_json` uses cached canonical sort keys and
+`canonical_manifest_array` to serialize one existing canonical value at a time.
+
+### 3. Contracts
+All affected-session reads precede writes; preserve old placement owners and
+source/resume claim contributors. Removing a repeated identity check requires
+proof that every final upsert ID came from validated source entries and no
+persisted identity write intervened. Payload merging cannot change that ID set.
+
+Bulk chunks are 512 rows with a tested bundled limit of 32766 variables; the
+widest statement binds 4096. The conservative 100-row constant is a manual
+build-time choice, not an automatic runtime fallback.
+
+Manifest validation, ordering, JSON field spelling/escaping/nulls, digest
+domains and length framing remain byte-identical. Final JSON strings remain
+stored and are hashed normally; streaming temporary values is not streaming
+hashing. Physical FTS rowids may change with batching. Canonical identity and
+the complete identity-to-FTS-content mapping, query ordering and scores must not.
+
+### 4. Validation & Error Matrix
+Identity conflict -> refusal before no-op or durable intent, with stored state
+unchanged. Duplicate/overlapping relation manifests -> existing bounded error,
+before journal creation. Durable-byte tamper -> existing commit refusal.
+Missing, duplicate or orphaned FTS links -> failed correctness verification.
+
+### 5. Good/Base/Bad Cases
+Good: a 514-message chain covers both a full placement/edge chunk and a tail,
+including exact source memberships. Base: an unchanged source preserves the
+entire raw snapshot. Bad: treating different physical rowids as different
+identities, or hiding a broken sidecar by simply excluding rowids.
+
+### 6. Tests Required
+Keep typed old-serializer and original-digest comparisons for Placement, Edge,
+Activity, Usage, source/resume/installation data and invalid manifests. Test
+same-source no-op and changed-source identity tamper with full state snapshots.
+Include a 200-message whole-batch rewrite with complete FTS mapping/content
+checks. Differential proofs use explicit accounting-time fields and bijective
+IDs; verify original digests before normalization. Shrink proof inputs can be
+pre-commit alias unions, not the later subtractive catalog projection.
+
+Benchmark different worktrees with isolated Cargo targets; assert frozen binary
+identity and expected schema before interpreting timings. Formal suites use a
+new `CARGO_TARGET_DIR`, an uncached run-1 receipt, serial reuse for runs 2/3,
+and unchanged harness bytes. The current formal harness rejects
+`CARGO_BUILD_BUILD_DIR`. Check trace availability and total suite bounds
+separately from report validation; neither validator alone proves the R4 gate.
+Check publication-safe author/committer identities before freezing a measured
+commit. A later metadata-only correction changes commit hashes even when every
+tree is identical. Preserve the original report binding and disclose the public
+equivalent-tree commit separately; never relabel it as independently measured.
+
+Preserve every measured pair and compare uninstrumented wall time against the
+predeclared exploratory gate. A lower nested trace stage is diagnostic only:
+`relation_upserts` includes both deletes and upserts, and `catalog_deletes`
+does not cover the later deletion loop. Do not sum nested stages or substitute
+their savings for end-to-end gains. Reject a failed prototype with its patch
+and receipts retained privately; restore only its owned diff and verify the
+exact prior source/tree before reusing that source's quality receipts.
+
+### 7. Wrong vs Correct
+Wrong: discard every `*_ms`, digest or cursor and call the remaining dump exact.
+Correct: preserve raw evidence, validate original commitments and cursor
+semantics, explain each permitted mapping, and keep no-op raw snapshots exact.
+Wrong: call passing validators or a faster trace stage a passed performance
+gate, or rerun unchanged source until the required threshold happens to pass.
+Correct: record the failed gate, keep main unchanged, and distinguish an
+unmerged experiment from a released optimization.
+
 ## Quality Check
 
 - `catalog` remains authoritative; `fts` fully rebuildable from it.

@@ -1,0 +1,12 @@
+# 本机开发默认只保留文件名与行号级调试信息，显著减少 target 体积。
+[profile.dev]
+debug = "line-tables-only"
+
+# 第三方依赖不需要完整调试信息，进一步减少磁盘占用。
+[profile.dev.package."*"]
+debug = false
+
+# 需要断点查看变量时使用：cargo build --profile debugging
+[profile.debugging]
+inherits = "dev"
+debug = true

@@ -15,6 +15,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -60,11 +61,13 @@ dependencies = [
  "agent-session-grep-testkit",
  "crossterm",
  "getrandom 0.4.3",
+ "libc",
  "ratatui",
  "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

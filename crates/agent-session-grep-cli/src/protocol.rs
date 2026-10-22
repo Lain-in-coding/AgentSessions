@@ -361,10 +361,29 @@ pub fn parse_output_mode(args: &[String]) -> Result<OutputMode, String> {
             // 列表必须与 main.rs 各前缀扫描器（extract_request_id/command_name/
             // intercept_help_or_version/extract_db_flag_impl）保持一致，漏掉一个
             // 会让它的取值把后面的 --robot/--output 挡在扫描之外。
-            "--db" | "--request-id" | "--cursor" | "--max-items" | "--max-bytes"
-            | "--max-messages" | "--max-evidence" | "--max-tokens" | "--policy" | "--level"
-            | "--provider" | "--since" | "--until" | "--session" | "--around" | "--tool-kind"
-            | "--tool-name" | "--from" | "--to" | "--alias-ttl-days" | "--plan" | "--backup" => {
+            "--db"
+            | "--request-id"
+            | "--cursor"
+            | "--max-items"
+            | "--max-bytes"
+            | "--max-messages"
+            | "--max-evidence"
+            | "--max-tokens"
+            | "--policy"
+            | "--level"
+            | "--provider"
+            | "--since"
+            | "--until"
+            | "--session"
+            | "--around"
+            | "--tool-kind"
+            | "--tool-name"
+            | "--from"
+            | "--to"
+            | "--alias-ttl-days"
+            | "--plan"
+            | "--backup"
+            | "--max-write-seconds" => {
                 it.next();
             }
             _ => {}
@@ -522,6 +541,29 @@ fn stream_frame(
     .to_string()
 }
 
+thread_local! {
+    static DEFER_OUTPUT_EXIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static PENDING_OUTPUT_EXIT: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+}
+
+/// Write commands must release their lease and wake durable maintenance even
+/// when a consumer closes a JSONL progress stream before the command finishes.
+pub(crate) struct DeferredOutputExit;
+impl DeferredOutputExit {
+    pub(crate) fn begin() -> Self {
+        DEFER_OUTPUT_EXIT.set(true);
+        Self
+    }
+}
+impl Drop for DeferredOutputExit {
+    fn drop(&mut self) {
+        DEFER_OUTPUT_EXIT.set(false);
+        if let Some(code) = PENDING_OUTPUT_EXIT.take() {
+            std::process::exit(code);
+        }
+    }
+}
+
 /// 协议 stdout 的唯一出口（println 替身）：整行写入 + 换行 + flush。
 ///
 /// CONTRACT §6：stdout 必须协议干净、退出码受控。下游提前关管道（head/pager）
@@ -529,6 +571,9 @@ fn stream_frame(
 /// 其余写失败归 source_io 类 → stderr 一行诊断 + exit 5。
 /// 逐行 flush 是必须的：块缓冲下 EPIPE 只在冲刷时暴露，且 jsonl 进度帧要求实时可见。
 pub fn write_stdout_line(line: &str) {
+    if PENDING_OUTPUT_EXIT.get().is_some() {
+        return;
+    }
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     let result = handle
@@ -536,11 +581,17 @@ pub fn write_stdout_line(line: &str) {
         .and_then(|()| handle.write_all(b"\n"))
         .and_then(|()| handle.flush());
     if let Err(error) = result {
-        if error.kind() == ErrorKind::BrokenPipe {
-            std::process::exit(0);
+        let code = if error.kind() == ErrorKind::BrokenPipe {
+            0
+        } else {
+            eprintln!("error [source_io]: cannot write protocol output: {error}");
+            5
+        };
+        if DEFER_OUTPUT_EXIT.get() {
+            PENDING_OUTPUT_EXIT.set(Some(code));
+        } else {
+            std::process::exit(code);
         }
-        eprintln!("error [source_io]: cannot write protocol output: {error}");
-        std::process::exit(5);
     }
 }
 

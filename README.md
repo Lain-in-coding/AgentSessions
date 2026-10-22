@@ -95,6 +95,14 @@ semantic backend (Candle + multilingual-e5-small) exists behind the
 See [Install and upgrade](docs/operations/INSTALL-AND-UPGRADE.md) for custom
 prefixes, persistent PATH setup, upgrades, and safe uninstall.
 
+## Journal maintenance
+
+Use `asg journal preview` to review old indexing-journal detail before
+submitting a durable background maintenance job. Maintenance combines verified
+backup, fixed-scope compaction and physical SQLite space reclamation; accepted
+jobs are not necessarily complete yet. See [Journal maintenance](docs/operations/JOURNAL-MAINTENANCE.md)
+for confirmation, the 30-second soft write budget, pause/retry and recovery.
+
 ## Providers
 
 Currently implemented (14/16 planned; 2 deferred — no transcript evidence):

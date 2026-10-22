@@ -216,6 +216,56 @@ or letting a read command create the database.
 Correct: resolve the path once, open read-only, and fail closed with an
 actionable, secret-redacted instruction when the catalog is absent.
 
+## Scenario: Journal CLI and detached worker
+
+### 1. Scope / Trigger
+The `journal` command family composes the independent maintenance use case.
+Queue-only commands must branch before the generic catalog-open dispatch.
+
+### 2. Signatures
+`journal preview`; `submit --plan TOKEN [--max-write-seconds N]`;
+`status [JOB_ID]`; `cancel JOB_ID`; `retry JOB_ID [--max-write-seconds N]`;
+`worker start|stop`. Global output/request-id/db flags remain prefix-only.
+
+### 3. Contracts
+Robot envelope stays 1.1. Project bounded public summaries and reason codes;
+accepted is durable enqueue, not completed. If spawn fails retain the job and
+report the worker was not started. Public errors must not reveal raw paths,
+IDs or bodies. Update all value-flag scanners consistently, not just dispatch.
+Worker start clears durable root pause; automatic wakes and the internal worker
+entrypoint never do. Use absolute executable paths, argument arrays and private
+temp environment, Windows hidden detach and disconnected stdio. No shell-built
+process strings or installed service. On Windows, child NUL streams alone do
+not prevent inheriting original parent pipe handles: suspend their inherit
+flags only around spawn and restore via RAII, including failure paths. Test
+that the parent output returns while the worker still waits for a writer.
+Lifecycle locking closes enqueue/idle-exit
+races; OS worker lock is authoritative. Keep retryable work alive; empty idle
+workers exit after 30 seconds. Status/preview/help/queries do not wake workers.
+Successful writing commands wake only an existing queue after releasing the
+catalog lease, including required finalization when stdout is a broken pipe.
+
+### 4. Validation & Error Matrix
+Invalid flags/budgets -> usage error without queue/catalog creation. Missing
+catalog must not prevent reading/cancelling existing queue jobs. Paused queues
+stay paused on submit/retry/writing; explicit worker start is the unpause action.
+
+### 5. Good/Base/Bad Cases
+Good: queued job proceeds after another writer releases its lock without any
+new request. Base: no queue means a normal write creates no maintenance state.
+Bad: status accidentally opens/migrates catalog or starts a worker.
+
+### 6. Tests Required
+Use real subprocesses for detached survival, single executor, enqueue/idle race,
+crash recovery, pause/start, cancellation and long-reader checkpoint deferral.
+Use isolated synthetic catalogs; assert actual DB and total footprint reduction,
+protocol/privacy/flag compatibility and no leaked workers/backups after success.
+
+### 7. Wrong vs Correct
+Wrong: return success after launching VACUUM and abandon the process on busy.
+Correct: report accepted separately and leave persistent, recoverable work with
+an automatically retrying worker and verifiable completion.
+
 ## Quality Check
 
 Before proposing a commit for this crate:
@@ -492,3 +542,253 @@ Correct: ask the adapter manifest what the provider streams, and let the stored
 scan rows decide whether an empty source is a no-op or a replacement.
 
 **Language**: write all guideline docs in **English**.
+
+## Scenario: Windows build-feedback evidence infrastructure
+
+### 1. Scope / Trigger
+The stdlib Python build-feedback commands under `scripts/evidence/` measure
+Windows NTFS/MSVC developer feedback and owned cache allocation. They are
+infrastructure, separate from product CLI/MCP/provider behavior and the official
+`core_beta_benchmark.py` release validator. Synthetic evidence cannot authorize
+profile adoption. Local paths, raw logs and tool/source receipts remain ignored.
+
+### 2. Signatures
+`build_feedback_benchmark.py inventory --root PATH [--store-root PATH] [--output FILE]`;
+`preview --protocol FILE --inventory FILE`; `run --protocol FILE [--review-receipt FILE]
+[--pair-limit 1..20]`; `compare --campaign FILE [--protocol FILE]
+[--qualifications FILE] [--output FILE]`. Public module APIs are
+`inventory(roots, store_roots=(), discover=True)`,
+`budget_status(B,current,free,predicted_growth=0)`, `make_protocol(configuration)`,
+`preview_protocol(protocol,inventory)` and `run_protocol(path,...)`. The v2
+paired and expanded full-capacity entries require
+`run_protocol(path, arm_finalizer=callable)` before output allocation. Initial
+leaf capacity does not require that callback. Qualification capture uses
+`capture_qualification(protocol,arm_record,qualification,*,review_receipt_path=None,
+prior_captures=(),release_options=None,diagnostic_argv=None)`.
+Retention APIs include `declare_output(protocol,target,lease_path)`,
+`create_fixture_seal(protocol,target,lease,seal_path)`,
+`create_full_capacity_seal(protocol,normalized_arm,qualifications,lease,seal_path)`,
+`verify_full_capacity_link(reference,protocol)` and
+`dispose_output(seal_reference,protocol,disposition_root)`; the literal fixture
+is independently approved synthetic lifecycle evidence only.
+Release import uses `compare_campaign(campaign)` with an immutable
+`protocol_evidence={path,sha256}`, and
+`paired_cluster_bootstrap(baseline_runs,candidate_runs,seed=...)` returns paired
+run confidence bounds for raw CLI observations.
+
+### 3. Contracts
+Inventory v1 reports allocated/logical bytes, global volume/file identity
+deduplication, root/cache contributions, aliases, informational exclusions,
+errors and completeness. Explicit source/Git/download cache declarations fail;
+nested excluded content is skipped while actual nested targets remain discoverable.
+Root/store overlap preserves store classification. Unknown reads or directory
+identity/metadata changes block admission; no logical-size fallback.
+
+Freeze the first complete related inventory as B. B+40 GiB requires explicit
+review; B+60 GiB blocks. The following 80 GiB floor and fixed 100-pair rules
+apply to v1; v2 uses the explicitly versioned extension below. V1 C free must
+remain at least 80 GiB after reserved growth.
+Do not rebase B or delete caches to make measurements fit. Timed polling uses
+conservative free-space/Job Object write bounds; quiet full handle scans remain
+allocation evidence. Anchor live free space at admission and retain its minimum
+observation so intervening external writes count. Enforce both the80 GiB floor
+and any stricter review floor; final allocation/free-space failure rejects the
+arm. Failed admission inventories and refusal receipts persist.
+
+Freeze source commit/tree/raw manifest, Cargo.lock/resources and concrete
+cargo/rustc1.97.1/MSVC binary hashes. Git line-ending stat noise is evaluated
+against actual diff plus byte-pinned manifest; staged/untracked drift fails.
+Real segment capture requires the verified MSVC environment receipt binding
+vcvars script/hash, compiler/linker and allowlisted LIB/INCLUDE/SDK variables;
+protocol preparation may precede verification, but real capture cannot. Changes
+stay child-local. Dedicated coordinator runtime/evidence-output source roots
+must be exact independent Git worktrees. Reject live/ordinary source roots,
+nested prewarm overlap, and output directories overlapping source roots.
+
+Six jobs use default features, --all-targets --locked --offline -j2; test threads2.
+Isolated layout runs six roots concurrently; three lanes run concurrent queues
+check/Clippy, domain+ports/CLI, SQLite/application. All roots, descendants and
+cache server launcher/listener live in one kill-on-close24 GiB committed-memory
+Job Object per arm. Incremental-on primary targets are reused for feedback/edit;
+only disposable one-shot-off uses a separate incremental-on feedback target.
+Defer artifact hashing until phase drain so it cannot hold up the next lane job.
+
+MBX uses explicit targets with views/lanes/adopt off, GC off, pinned CARGO and
+private child platform config/store. sccache warm-store candidate requires
+READ_ONLY and an unreachable internal LRU ceiling; cold prewarm writes are a
+separate guarded setup with six successful owned offline jobs. Store admission
+checks actual allocation strictly below its own reservation; whole-pair target
+forecast is not re-added to that store. MBX writes have an independent live
+reservation bound. Neither path changes global PATH or runs cleanup.
+The dedicated listener PID and every daemon descendant must remain job-owned;
+confirmed exited enumeration entries may be skipped, unknown identities fail.
+
+Pilot is fixed5 paired batches; formal is100 pairs per finalist, at most2.
+Order is seed-balanced;20 is a health checkpoint only. Preserve every attempt,
+retry only contamination with fresh allocations, and never drop resource/test
+failures. Cargo JSON from each invocation binds artifacts; overwritten lane
+artifacts use final file identity plus immutable logs. Qualification requires
+actual receipt/log/artifact/report hashes and same source/toolchain/protocol,
+not inline pass flags. Release comparison binds normalized phase, fixed N,
+comparison kind, seed, schedule, jobs, source/toolchain and every arm allocation
+to the hashed protocol. Arm receipt and target roots must equal the exact
+run-root/pairs/pair-index-attempt/arm allocation layout. Only its source-manifest-approved official validator in
+the exact arm worktree may execute `validate_report(path,expected_profile="full")`.
+Check validator path/hash/size, preserve original internal errors, and recheck
+validator/report bytes after validation. Capture argv directly executes the
+official script's run subcommand, and the complete baseline report interval must
+be inside that command capture. The suite binary is the originating Cargo
+artifact copy at `suite_root/baseline-cli.exe`.
+
+Release timings are the official full report's
+`baseline.anchor.observations[*].process_wall_ms`, covering
+`cli_startup_warm_latency_ms`20, `cli_startup_cold_latency_ms`20,
+`search_latency_ms`100, `show_latency_ms`100 and `get_latency_ms`100 per arm.
+Validate measured role/index/phase/argv/exit codes, legacy raw links, finite
+positive durations, serial observation/capture containment, same dataset/state/
+profile, approved pair order and unique report hashes across arms and pairs.
+Both startup operations have observation phase `startup`; metric state carries
+warm/cold meaning. Copied-binary cold state is `cold_best_effort`, without an
+OS-cache flush claim.
+Resample whole outer pairs, preserving all inner invocations, for 5000 seeded
+paired cluster percentile bootstrap draws; compute pooled nearest-rank P50/P95.
+Every `release_<metric>_{p50,p95}` upper95% ratio bound must be<=1.05.
+Uncertain bounds prevent adoption; synthetic success is implementation evidence
+only and never establishes actual release performance.
+
+### Versioned bounded-trial extension (v2)
+
+The preceding80GiB/fixed100/live-file contract remains immutablev1. V2 binds
+capacity/Pilot/Formal with `budget_policy={policy_version:2,
+minimum_free_bytes:40GiB,external_growth_allowance_bytes:8GiB}`, pinned
+reservation provenance, independently approved retention policy and registered
+formalN. `inventory(...,minimum_free_bytes=...)` exposes the selected floor;
+`budget_status(...,policy_version=2,minimum_free_bytes=40GiB,
+external_growth_allowance_bytes=8GiB)` reserves external disk separately while
+measuring actual related allocation against fixedB. Initial capacity reserves
+8GiBowned output, therefore starts with>=56GiBfree; exact integer/schema
+validation rejects alteredv1andv2policies. Complete source/process/MSVC/current
+inventory and memory admission remains required.
+
+Capacity is one native domain/ports check/test with alltargets/defaultfeatures,
+locked/offline/jobs2/testthreads2 under the same24GiBcommitted Job Object. A
+intentionalownedcapstop is `capacity_limited`, never a successful job or paired
+performance sample. It retains honest final allocation/live-write/minfree and
+full logs, source and captured process proof. Allsixjobs and primary/warm/edit
+reuse remain unchanged forPilot/Formal.
+
+
+Expanded full capacity declares one selected native arm with all18captures and
+complete artifact-dependent qualification, phasecapacity/pairs0. The exact
+`capacity_probe.kind="full-arm-and-qualification"` shape includes stageexpanded,
+source_root,arm andowned_output_cap_bytes; `declared-full-arm-cap` provenance
+pins a genuine prior leaf seal and rationale. Its declared cap is at least
+8GiB and `cache_reservation_bytes(prior_verified_leaf_peak)`, a controlled
+observation bound, not a promise the full workload fits. An8GiBcap requires
+56GiBfree and may intentionally stop; it never lowers the oldv1 39GiBforecast. Both baseline
+andcandidate configuration hashes require full closure coverage before Pilot
+reservation uses maxverifiedpeak+margin. Never construct a fake Pilot campaign
+to generate first capacity evidence.
+
+V2 generated `qualification_allocations` declare exact source-relative official
+release suite roots under ignored evidence-output/build-feedback. The unchanged
+producer's reports and baseline-cli.exe remain there with original lineage.
+Bill suite/scratch/retained evidence together with full arm outputs; cumulative
+real JobObject qualifier captures carry previous allocation/write minima.
+The official release child environment strips unsupported compiler/wrapper/
+profile overrides and uses approved process-local tool paths, with
+PYTHONDONTWRITEBYTECODE=1. V2 _verify_source checks ignored files and permits
+only exact declared suite output, refusing reparse paths. _ApprovedSourceLoader
+uses verified source bytes without .pyc reads/writes. Existing recent bytecode
+is preserved and makes that source ineligible; choose another clean frozen
+source at the same approved identity rather than deleting protected output.
+Clippy/optional-feature proof requires real Cargo records and complete captured
+artifact lists; diagnostics binds approved argv, frozen source and original
+Cargo artifact lineage. Expected receipt text alone cannot qualify.
+`normalize_runner_arm` shares exact live arm verification, while distinct
+`create_full_capacity_seal`/`verify_full_capacity_link` never qualify pairs.
+The full-capacity seal and ordinary qualification proofs remain in the budgeted
+capacity arm directory; official suite lineage stays at its declared source.
+Incomplete diagnostics/release reports remain protected after cap-stop and
+cannot qualify disposal based only on a stopped-command marker.
+
+`build_feedback_retention.py` owns the exact newtargets lifecycle. A precreation
+lease proves observedabsence within an independently approved literalallowlist;
+protected source/Git/common directories/daily/recentexistingcaches/stores/seeds/
+qualitysourcefailures/pagefile/unrelatedbin items refuse. Approved knownchecker
+and allverificationtools are hash/sizebound, no receipt-selectedcode. Verify all
+artifact-dependent quality/release evidence whilebytesexist, seal fullstableNTFS
+identity/hash/sizeclosure, preserve rawlogs/reports/source/finalbinaries, then
+recycle->matchexactShellitem/tree->purgeonlymatcheditem->verifyactualrelease.
+Quota/noeviction, Pre/Postdelete/disposition and interruptedstates must verify.
+NoADShardlinks/reparse/path ambiguity or partialmissingproof succeeds. Ordinary
+live missingfiles remain invalid. Localintegrity seals are explicitly a local
+pre-disposal observation: deletedbytes cannot be independentlyreread, and a
+localkey is not independentattestation against thatkeyholder. Unknown mutation
+is reconciled before retry; inconclusive release cannot re-delete the item. Own flushed intent/proof allocation precedes the immediate free-before-purge baseline; lost crash baselines remain inconclusive, never invented release.
+
+Pilot remainsfivepairedbatches. Formalv2 requires a completedsameidentityPilot
+and approvedfixedNregistration frozen before anyformaldata, with seed/order/
+source/config/rationale/maximumtime/storage/stoppingrule. A smallercount never
+waives 95%bounds, correctnesstests/diagnostics/optionalfeatures or the official
+fullrawrelease protocol. Noadaptivesampleaddition;20ishealthsegmentonly. V1
+still requires100. Capacity/synthetic receipts cannot authorize adoption.
+
+
+V2 normalized campaign evidence pins `runner_campaign_evidence={path,sha256}`
+to the exact originating runner campaign. Comparison revalidates resume and
+rebuilds all attempts, raw failures/statuses, samples and registered resource
+projection. Successful arm seals do not authorize dropping failed attempts or
+relabeling a budget-limited campaign as valid performance data.
+
+### 4. Validation & Error Matrix
+Incomplete/changed inventory -> `inventory_capture_incomplete` with retained
+receipt; projected C free below the selected floor after output reservation
+and external allowance -> `projected_disk_free_below_minimum` before creating
+targets (v1 floor 80 GiB; v2 floor 40 GiB plus 8 GiB external allowance,
+therefore 56 GiB starting free for the initial 8 GiB probe); source drift -> source-specific refusal; changed
+MSVC receipt -> identity refusal; unknown process/daemon -> capture failure;
+foreign build -> contaminated pair; job commit failure -> memory_limited;
+timeout -> whole-tree drain and retained failure; missing/stale qualification
+proof -> qualified=false. Missing real paired release CLI workload timing ->
+`qualification_release_cli_workload_timing_unverified`, even with a valid
+legacy report lacking raw measured observations. Changed protocol projection,
+unapproved validator or missing/tampered/duplicate/overlapping release observations
+also refuse qualification; enclosing harness wallclock is not release performance.
+Exit2 indicates incomplete/unqualified results.
+
+### 5. Good/Base/Bad Cases
+Good: complete deduplicated inventory, fixedB protocol, fresh frozen worktrees,
+quiet/offline job capture and exact protocol-bound formalN with qualification
+(v1=100; v2=approvedpre-registeredNafterfivePilotpairs).
+Base: safe inventory/preview or partial pilot reports useful observations while
+retaining incomplete evidence and no adoption. Bad: resetting B, deleting recent
+caches, treating summed concurrent durations as wallclock, certifying a readonly
+warm-store result as general write-cache behavior, changingfixedNafterformal
+sampling, treatingcapacityasPilot, or pooling inner release invocations as
+independentoutertrials.
+
+### 6. Tests Required
+Stdlib focused tests assert nested exclusions, root/store overlap, alias drift,
+immutable receipts, NTFS hardlinks/compression/sparse/ADS/junction loops,
+budget boundaries, raw source+Git drift, all-targets, fixedN/order/resume,
+real Windows six-root/three-lane concurrency, committed-memory and full-tree
+timeout/budget drain, daemon ownership, stale artifacts and fabricated proof
+rejection. V2asserts56GiBinitialadmission, honestcapacitycap/qualityfailure
+distinction, newtargetleases, matchedrecyclequota/noeviction, signedseal/stage
+closure, interruptedmove/purge recovery, casefold/ADS/fulltreechanges and
+ordinarymissingartifactrefusal; syntheticfixturecanneverqualify. V2 additionally rejects raw campaign hash drift, dropped failed attempts, relabeled budget-limited pairs and altered compute/storage projections. Release regressions assert protocol phase/N/seed/order/kind drift,
+approved-source validator import/common API and original errors, report/validator
+mutation, raw workload coverage and paired cluster versus explicit resampling.
+`cargo fmt --all --check` remains the appropriate no-build check;
+real Cargo quality/optional-feature/release checks require budget admission.
+
+### 7. Wrong vs Correct
+Wrong: scan the whole runtime on every timed poll, count nested targets twice,
+require porcelain empty after byte-exact restoration, permit cache LRU to erase
+retained evidence, or accept `{status:passed}` as qualification.
+Correct: freeze completeB with identities, use low-cost conservative live bounds,
+check raw bytes and actual Git contents, isolate/no-evict cache tools, and verify
+immutable actual command/artifact/raw-report proof against the approved protocol
+before interpreting paired statistics. A successful validator import fixture does
+not certify a real release binary or performance result.

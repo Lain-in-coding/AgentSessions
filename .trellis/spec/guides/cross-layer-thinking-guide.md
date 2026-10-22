@@ -257,3 +257,55 @@ state correctly, but several commands still re-parsed event payload fields with
 local casts. The fix was to make the core event layer own `ThreadChannelEvent`
 and `isThreadEvent`, make `reduceChannelMetadata` the only channel metadata
 projection, and make `reduceThreads` the only thread replay reducer.
+
+## Build Evidence Projection Boundary
+
+- [ ] Does comparison recheck every immutable receipt file's recorded hash and
+      payload, instead of accepting an inline completion flag or current scan?
+- [ ] When a runner adds a phase, do normalization and tests include its job
+      sequence, exit status, process capture, log hashes and artifact receipts?
+- [ ] When warm lanes or edit probes replace an artifact, do immutable logs pin
+      every invocation while comparison verifies the final file identity?
+- [ ] Does an incomplete allocation keep useful timing summaries available
+      while retaining missing evidence and rejecting formal qualification?
+- [ ] Does a forecast distinguish complete pilot evidence from five usable
+      timing pairs whose storage, source or capture evidence is incomplete?
+- [ ] Does initial inventory scope cover retained caches and the dedicated run
+      outputs throughout admission and polling without resetting baseline B?
+- [ ] Do initial store declarations remain stores in subsequent scans, so an
+      unchanged path cannot hide opaque blobs by becoming a discovery root?
+- [ ] Can a cache tool's internal eviction delete retained evidence before an
+      external allocation poll reacts? Missing prevention must block admission.
+
+- [ ] Do nested informational source/download exclusions remain separate from
+      invalid explicit declarations, while actual nested targets stay discoverable?
+- [ ] Does root/store overlap preserve store classification and deduplication?
+- [ ] Do short-process query failures skip only entries proven terminated?
+- [ ] Is timed monitoring separate from complete allocation evidence, and does
+      artifact hashing happen after phase drain so lane scheduling stays measurable?
+- [ ] Is the daemon's launcher/listener tree explicitly owned, rather than an
+      assumed count of one persistent process?
+- [ ] Does live budget accounting keep the admission free-space origin and its
+      minimum observation, enforce the owner floor and reject final overruns?
+- [ ] Is store allocation checked independently from whole-pair target forecast,
+      with a separate live guard for writable stores?
+- [ ] Are real MSVC capture and exact dedicated Git worktree identities required,
+      while ignored runtime paths remain usable after helper installation?
+- [ ] Is actual release CLI workload timing verified independently of the
+      enclosing harness duration before publishing a release performance gate?
+- [ ] Does normalized phase/N/seed/schedule/configuration still match the immutable
+      source protocol, including retry allocations, exact receipt/target layout
+      and arm order?
+- [ ] Does approved validator selection bind source-manifest path/hash/size and
+      recheck validator/report bytes after its common API returns?
+- [ ] Are raw invocation coverage, state, dataset and serial capture intervals
+      retained, with the entire report run contained in the directly executed
+      official command and unique report hashes across paired runs?
+- [ ] Does bootstrap resample outer pairs with all their inner observations,
+      rather than claiming each invocation is an independent trial?
+- [ ] Are import/API regression fixtures distinguished from actual release
+      performance qualification and fixed-N campaign completion?
+
+Executable contracts live in `scripts/evidence/build_feedback_*.py`, their
+focused `unittest` suites, and `docs/operations/BUILD-FEEDBACK.md`. These are
+build infrastructure; synthetic evidence cannot authorize product adoption.

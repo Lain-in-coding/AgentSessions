@@ -6,7 +6,7 @@
 //! 「stdout 上恰好一行契约 JSON，或者一个字节都没有」，而不是 CLI 的通用
 //! envelope；单测覆盖投影函数，这里覆盖真实进程的 stdout/stderr/exit。
 
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::process::{Command, Output, Stdio};
 
 const BIN: &str = env!("CARGO_BIN_EXE_agent-session-grep");
@@ -22,12 +22,18 @@ fn run_hook(db: &std::path::Path, payload: &str, args: &[&str]) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("failed to spawn agent-session-grep binary");
-    child
+    if let Err(error) = child
         .stdin
         .as_mut()
         .expect("stdin is piped")
         .write_all(payload.as_bytes())
-        .expect("failed to write hook payload");
+    {
+        assert_eq!(
+            error.kind(),
+            ErrorKind::BrokenPipe,
+            "failed to write hook payload: {error}"
+        );
+    }
     child.wait_with_output().expect("failed to collect output")
 }
 

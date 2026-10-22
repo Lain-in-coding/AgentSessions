@@ -1,0 +1,13 @@
+{"file": ".trellis/spec/guides/index.md", "reason": "Required shared guide index."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "New stdlib evidence helpers must reuse and validate common contracts."}
+{"file": ".trellis/tasks/10-18-build-feedback-infrastructure/research/verified-build-tool-boundaries.md", "reason": "Current official Cargo, MBX, sccache and Win32 contracts; no implied measured speedups"}
+{"file": ".trellis/spec/agentsessions-cli/backend/index.md", "reason": "Executable Windows build-feedback signatures, budget/source/toolchain/process and qualification contracts."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Keep inventory, process, command-artifact and statistical evidence boundaries consistent."}
+{"file": "docs/operations/BUILD-FEEDBACK.md", "reason": "Current v2 bounded capacity/retention/provenance contracts and execution limits; v1 80GiB/fixed100 remains preserved. Tool checkpoints are synthetic validation, not measured performance."}
+{"file": "scripts/evidence/build_feedback_coordinator.py", "reason": "Current explicit v2 arm lifecycle, artifact qualification, exact disposal, reservation observation and measured reservation producers."}
+{"file": "scripts/evidence/test_build_feedback_coordinator.py", "reason": "Meaningful fixture authority, duplicate-configuration and insufficient-margin regressions for the v6 coordinator."}
+{"file": ".trellis/spec/agentsessions-cli/backend/build-verification.md", "reason": "Executable local/CI build verification and opt-in cache-tool contract"}
+{"file": ".trellis/tasks/10-18-build-feedback-infrastructure/research/2026-10-22-test-runner-experiment.md", "reason": "Measured cargo-nextest 0.9.149 t8 decision, doctest inclusion, default-thread WriterBusy disqualification and native-CI boundary."}
+{"file": "scripts/dev/verify.ps1", "reason": "Current package-check/package-test and full-mode runner selection, validation, doctest and restoration contract."}
+{"file": "scripts/dev/install-nextest.ps1", "reason": "Pinned Windows x86_64 cargo-nextest 0.9.149 installer with archive hash, exact version, idempotence and user-local/override roots."}
+{"file": ".github/workflows/ci.yml", "reason": "Windows test matrix installs pinned nextest under RUNNER_TEMP, runs t8 workspace tests plus doctests, and preserves native Linux/macOS and existing gates."}
