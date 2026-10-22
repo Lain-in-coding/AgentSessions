@@ -11,3 +11,4 @@
 {"file": "docs/operations/BUILD-VERIFICATION.md", "reason": "Verify operational policy and measured evidence"}
 {"file": ".github/workflows/ci.yml", "reason": "Verify CI split, cache keys, pinned toolchain and gates"}
 {"file": ".trellis/spec/agentsessions-cli/backend/build-verification.md", "reason": "Verify executable build verification contract and cleanup hard stop"}
+{"file": ".trellis/tasks/10-18-build-feedback-infrastructure/research/2026-10-22-test-runner-experiment.md", "reason": "Verify measured runner result, minimum version, explicit-invalid failure behavior and local-only decision against raw receipts."}

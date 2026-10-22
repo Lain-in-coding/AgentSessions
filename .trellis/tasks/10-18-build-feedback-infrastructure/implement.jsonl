@@ -7,3 +7,5 @@
 {"file": "scripts/evidence/build_feedback_coordinator.py", "reason": "Current explicit v2 arm lifecycle, artifact qualification, exact disposal, reservation observation and measured reservation producers."}
 {"file": "scripts/evidence/test_build_feedback_coordinator.py", "reason": "Meaningful fixture authority, duplicate-configuration and insufficient-margin regressions for the v6 coordinator."}
 {"file": ".trellis/spec/agentsessions-cli/backend/build-verification.md", "reason": "Executable local/CI build verification and opt-in cache-tool contract"}
+{"file": ".trellis/tasks/10-18-build-feedback-infrastructure/research/2026-10-22-test-runner-experiment.md", "reason": "Measured cargo-nextest 0.9.149 t8 decision, doctest inclusion, default-thread WriterBusy disqualification and native-CI boundary."}
+{"file": "scripts/dev/verify.ps1", "reason": "Current package-check/package-test and full-mode runner selection, validation, doctest and restoration contract."}

@@ -19,8 +19,63 @@ script path:
 pwsh ./scripts/dev/verify.ps1 -Package agent-session-grep-domain
 ```
 
-Package mode runs only the targeted check. It is the default feedback loop for
-editing; it is not an integration result.
+Package check mode runs only the targeted check. It is the default feedback
+loop for editing; it is not an integration result.
+
+To test one package, add `-Test`:
+
+```powershell
+pwsh ./scripts/dev/verify.ps1 -Package agent-session-grep-domain -Test
+```
+
+Package-test mode runs that package's tests and its doctests. Native Cargo tests
+are selected with `-NativeTests`:
+
+```powershell
+pwsh ./scripts/dev/verify.ps1 -Package agent-session-grep-domain -Test -NativeTests
+```
+
+## Test runner selection
+
+Test modes use `cargo-nextest 0.9.149` or newer when one is explicitly available
+in the current checkout. The wrapper resolves the runner before running Cargo,
+using this order:
+
+1. `-NextestPath <path>`;
+2. `ASG_NEXTEST=<path>`;
+3. candidates on `PATH` and under either
+   `.trellis/.runtime/nextest-*/bin/cargo-nextest.exe` or one task-directory
+   level at `.trellis/.runtime/*/nextest-*/bin/cargo-nextest.exe`, choosing the
+   highest valid version.
+
+An explicit path must exist, report a parseable version, and satisfy the minimum
+version. An invalid explicit path fails instead of falling back. If automatic
+discovery finds candidates but none is usable, the wrapper also fails; native
+fallback happens only when no candidate exists. `-NativeTests` is the explicit
+bypass.
+
+The wrapper never installs nextest, changes `PATH`, or edits global Cargo
+configuration. A local executable can be selected without exposing it globally:
+
+```powershell
+pwsh ./scripts/dev/verify.ps1 -NextestPath C:\tools\cargo-nextest.exe
+```
+
+Nextest runs with eight test threads, four Cargo build jobs, and
+`--no-fail-fast`:
+
+```text
+cargo-nextest nextest run --workspace --locked --test-threads 8 --build-jobs 4 --no-fail-fast
+```
+
+Nextest does not run doctests, so the wrapper follows a successful nextest run
+with native Cargo doctests. Package-test mode uses `-p <package>` for both
+commands; full mode uses `--workspace`. The native fallback uses one
+`cargo test` command, which includes doctests:
+
+```text
+cargo test --workspace --locked -j 4 --no-fail-fast
+```
 
 ## Serial integration gate
 
@@ -30,20 +85,20 @@ Run one full gate after the edit set is ready:
 pwsh ./scripts/dev/verify.ps1
 ```
 
-With no `-Package`, the script runs these commands in order and stops at the
-first nonzero exit:
+With no `-Package`, the script runs these stages in order and stops at the first
+nonzero exit:
 
 ```text
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked
+nextest workspace tests and separate Cargo doctests, or native Cargo tests
 ```
 
-The script sets `CARGO_BUILD_JOBS` to `4` by default, accepts a lower value with
-`-Jobs 1..4`, and restores the previous process environment and working
-directory when it exits. Local builds retain Cargo's configured incremental
-behavior. CI disables incremental compilation because its runners start from a
-fresh checkout.
+Use `-NativeTests` to force the final stage to native Cargo. The script sets
+`CARGO_BUILD_JOBS` to `4` by default, accepts a lower value with `-Jobs 1..4`,
+and restores the previous process environment and working directory when it
+exits. Local builds retain Cargo's configured incremental behavior. CI disables
+incremental compilation because its runners start from a fresh checkout.
 
 ## Shared machine concurrency
 
@@ -52,7 +107,12 @@ to compile concurrently, limit the machine to at most three Cargo processes and
 give each process `-j4` (or `CARGO_BUILD_JOBS=4`). Additional full gates should
 wait rather than increase compiler and disk pressure.
 
-## Optional tooling
+## CI
+
+CI keeps native `cargo test` pending a separately authorized hosted-run
+experiment; it does not install or select nextest. Pull-request workflow groups
+use PR-scoped concurrency and cancel an older in-progress run when a newer run
+for the same PR starts.
 
 MBX and sccache are not defaults. Use them only for an explicitly scoped
 measurement with isolated stores and recorded evidence; do not add a wrapper,
@@ -60,6 +120,30 @@ change global `PATH`, or treat a tool trial as a general build recommendation.
 The CI workflow keeps the repository cache, binds its key to `Cargo.lock`,
 `rust-toolchain.toml`, and `.cargo/config.toml`, and runs the semantic-candle
 matrix separately from the main test matrix.
+
+## Measured nextest trial
+
+A local Windows/MSVC comparison on 2026-10-22 used Cargo/Rust `1.97.1`,
+`cargo-nextest 0.9.149`, one clean source commit, a warm shared target, and five
+paired baseline/nextest-t8 rounds. Nextest used eight test threads and four
+build jobs; each measured total included the following Cargo doctest command.
+
+| Metric | Native Cargo | Nextest t8 | Difference |
+|---|---:|---:|---:|
+| Median | 101.562 s | 72.072 s | 29.04% faster |
+| Nearest-rank P95 | 103.130 s | 73.414 s | 28.81% lower |
+
+The paired median ratio was `0.7133`, with a bootstrap 95% interval of
+`0.7006–0.7470`. Nextest discovered 2001 tests, skipped 23, and executed 1978
+per run. All five selected nextest-t8 pairs exited successfully.
+
+Default-thread nextest was not selected. In its final round,
+`agent-session-grep-adapters-sqlite::maintenance_queue
+concurrent_first_open_is_serialized_inside_initialization_transaction` failed
+with `WriterBusy("maintenance queue is busy")`; that round executed 1978 tests,
+with 1977 passing, one failing, and 23 skipped. The fixed eight-thread candidate
+therefore remains a local opt-in. This is a Windows-local result, not hosted-CI
+evidence or permission to change CI.
 
 ## Measured MBX trial
 

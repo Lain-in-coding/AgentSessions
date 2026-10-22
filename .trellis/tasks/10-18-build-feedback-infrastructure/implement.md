@@ -601,3 +601,44 @@ source disappear without exposing a corresponding Recycle Bin item. Cleanup
 stopped immediately. No source, Git metadata, task evidence, Beta debug cache or
 other user data was affected; the four trial worktrees remain pending explicit
 follow-up. See `research/2026-10-22-mbx-windows-trial-and-safe-cleanup.md`.
+
+
+## Local test-runner workflow checkpoint (2026-10-22)
+
+`scripts/dev/verify.ps1` now retains package-check mode and adds
+`-Package <package> -Test`. Test modes use cargo-nextest `0.9.149` or newer when
+explicitly available through `-NextestPath`, `ASG_NEXTEST`, `PATH`, or the
+current checkout's `.trellis/.runtime/nextest-*/bin/cargo-nextest.exe` or
+`.trellis/.runtime/*/nextest-*/bin/cargo-nextest.exe`; automatic candidates
+select the highest valid version. Explicit invalid paths/versions and
+candidate sets with no usable version fail before Cargo runs. Native fallback is
+used only when no candidate exists, and `-NativeTests` is the explicit bypass.
+
+Nextest runs with eight test threads, four build jobs and `--no-fail-fast`, then
+native Cargo runs doctests separately for package or workspace mode. Native tests
+remain one `cargo test` command and include doctests. The existing working
+directory and `CARGO_BUILD_JOBS` restoration remains in `finally`.
+
+The measured five-pair result is P50 `101.562 s` native versus `72.072 s`
+nextest-t8 (29.04% faster), and P95 `103.130 s` versus `73.414 s` (28.81%
+lower). The paired median ratio is `0.7133` with bootstrap 95% interval
+`0.7006-0.7470`; discovery is 2001 tests, 23 ignored and 1978 executed. Default
+thread nextest is disqualified by the recorded `WriterBusy("maintenance queue is
+busy")` failure. CI keeps native Cargo tests and now has PR-scoped concurrency
+with cancellation; hosted nextest remains pending a separately authorized run.
+
+Static checks completed for this dispatch: PowerShell 7 and Windows PowerShell
+5.1 AST parse passed; `Get-Help` exposed all five parameters; PyYAML parsed all
+five workflows and the 12 workflow contract tests passed; task JSON parsed; and
+`git diff --check` passed for the owned files. No Cargo test or full gate was run,
+by dispatch instruction. The main session owns verification of the new runner
+path.
+
+## Nextest workflow verification (2026-10-22)
+
+The real package-test path passed 70/70 domain tests and package doctests. The
+complete serial `scripts/dev/verify.ps1` gate passed format, workspace Clippy,
+1978/1978 nextest tests across 75 binaries with 23 skipped, and every workspace
+doctest target. Independent review confirmed runner discovery, version rejection,
+native fallback, PowerShell 5.1/7 compatibility, PR concurrency, CI gates and
+task-context validity. No code defect required a fix.
