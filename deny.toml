@@ -12,7 +12,15 @@
 # RustSec 漏洞库；漏洞/unsound 默认即 error，无需逐项声明。
 yanked = "deny"
 unmaintained = "workspace"
-ignore = []
+ignore = [
+  # candle-core 0.10.2 only constructs ZipArchive and reads named entries for
+  # npy/pickle loading. It never calls ZipArchive::extract, extract_stream, or
+  # any other filesystem extraction API covered by these advisories. Review
+  # this exception whenever candle-core or its ZIP dependency changes.
+  { id = "RUSTSEC-2026-0367", reason = "candle-core reads archive entries and does not call ZIP extraction APIs" },
+  { id = "RUSTSEC-2026-0368", reason = "candle-core reads archive entries and does not call ZIP extraction APIs" },
+  { id = "RUSTSEC-2026-0369", reason = "candle-core reads archive entries and does not call ZIP extraction APIs" },
+]
 
 [licenses]
 # 只允许与本项目 MIT OR Apache-2.0 兼容的宽松许可。
