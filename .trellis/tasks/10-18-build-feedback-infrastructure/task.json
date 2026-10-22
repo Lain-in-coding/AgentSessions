@@ -569,6 +569,90 @@
       "ruff": "passed",
       "mypy": "passed",
       "whitespace": "passed"
+    },
+    "cargo_profile_rollout": {
+      "status": "complete",
+      "completed_at": "2026-10-22",
+      "project_config": "C:\\AgentSessions\\.cargo\\config.toml",
+      "user_config": "C:\\Users\\小Q\\.cargo\\config.toml",
+      "toolchain": "1.97.1",
+      "machine_default_stable": "1.99.1",
+      "build_exit_code": 0,
+      "build_seconds": 40.38,
+      "debug_target_gib_after_build": 2.354,
+      "debug_target_gib_after_tests": 2.869,
+      "test_exit_code": 0,
+      "test_seconds": 94.66,
+      "clippy_exit_code": 0,
+      "clippy_seconds": 17.27,
+      "debugging_profile_verified": true,
+      "external_project_inherited": true,
+      "hashes": {
+        "C:\\AgentSessions\\.cargo\\config.toml": {
+          "sha256": "30865041a1bd96c1657979f62a8baa2d67862599e82a56d69fb7e8c08f698014",
+          "bytes": 377
+        },
+        "C:\\AgentSessions\\rust-toolchain.toml": {
+          "sha256": "cd86aadccbc83e59b17d379be8d502367f69ba988eb0ac190d013bdc496ec319",
+          "bytes": 107
+        },
+        "C:\\Users\\小Q\\.cargo\\config.toml": {
+          "sha256": "30865041a1bd96c1657979f62a8baa2d67862599e82a56d69fb7e8c08f698014",
+          "bytes": 377
+        },
+        "C:\\AgentSessions\\.trellis\\.runtime\\cargo-config-20261022\\cleanup-recycle.json": {
+          "sha256": "ffc1c5312f0b10d7120604235c1a756c6e45f2966e1962ce3f00d7d7697b9927",
+          "bytes": 7167
+        },
+        "C:\\AgentSessions\\.trellis\\.runtime\\cargo-config-20261022\\defender-exclusion.json": {
+          "sha256": "676e1960ed95f0389c7735294182a90ca23d110a30b96fe3a6ca38b22c6a9921",
+          "bytes": 1150
+        }
+      }
+    },
+    "tutorial_cleanup": {
+      "status": "completed-with-permanent-removals",
+      "items": 27,
+      "recycled_items_verified": 21,
+      "permanently_removed_items": 6,
+      "permanently_removed_paths": [
+        "C:\\AgentSessions\\target\\debug (old generation; rebuilt afterward)",
+        "C:\\AgentSessions\\.trellis\\.runtime\\build-feedback-infrastructure-20261018\\quick-local-v2-20261022\\baseline\\targets",
+        "C:\\AgentSessions\\.trellis\\.runtime\\build-feedback-infrastructure-20261018\\quick-local-v2-20261022\\candidate\\targets",
+        "C:\\AgentSessions\\.trellis\\.runtime\\build-feedback-infrastructure-20261018\\full-baseline-v11-preflight-20261021",
+        "C:\\AgentSessions\\.trellis\\.runtime\\build-feedback-infrastructure-20261018\\quick-local-v1-20261022",
+        "C:\\AgentSessions\\.trellis\\.runtime\\build-feedback-infrastructure-20261018\\full-baseline-v8-clippy-20261021"
+      ],
+      "measured_gib": 105.299,
+      "all_original_paths_absent": true,
+      "recycle_receipt_note": "The generated cleanup receipt labels all 27 items as moved to the Recycle Bin, but only 21 have Recycle Bin metadata. Six large directories were removed outside the Recycle Bin and are not recoverable through it.",
+      "whole_recycle_bin_emptied": false,
+      "recycle_items_before": 14,
+      "recycle_items_after": 35,
+      "recycle_delta": 21,
+      "free_before_gib": 56.223,
+      "free_after_gib": 82.638,
+      "preserved": [
+        "target/release",
+        "target/msrv-1.90",
+        "Beta target",
+        "g6 evidence",
+        "attribution-closeout",
+        "latest inventory",
+        "fixed-B inventory"
+      ],
+      "corrected_audit": {
+        "path": "C:\\AgentSessions\\.trellis\\.runtime\\cargo-config-20261022\\cleanup-audit-corrected.json",
+        "sha256": "8a9017e5bb10118a972272580bb024466a2be0e14c582f078709c012d5193b9e",
+        "bytes": 1449
+      }
+    },
+    "defender_target_exclusion": {
+      "status": "verified",
+      "target_excluded": true,
+      "preexisting_c_drive_exclusion": true,
+      "additional_speed_gain_expected": false,
+      "note": "C:\\ was already excluded, so the exact target exclusion is redundant for scan coverage."
     }
   }
 }

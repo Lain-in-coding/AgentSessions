@@ -538,3 +538,38 @@ The focused and broader runner checks passed (29/29), Ruff, Mypy and whitespace
 checks passed. The local result supports trying the combined candidate on this
 machine; it is not a five-pair confidence-bound, formal or project-wide release
 claim.
+
+
+## Cargo profile rollout and cleanup checkpoint (2026-10-22)
+
+The owner selected a machine-wide Cargo policy plus a repository override.
+`rust-toolchain.toml` now pins Cargo/Rust 1.97.1; the machine default stable
+toolchain was repaired independently and reports Cargo/Rust/Clippy 1.99.1.
+Both `%USERPROFILE%\.cargo\config.toml` and `.cargo/config.toml` configure
+`line-tables-only`, omit dependency debug info, and provide a full-debug
+`debugging` profile.
+
+Verification under the new policy:
+
+- clean `cargo build --workspace --all-targets --locked -v`: exit 0 in 40.38 s;
+- new `target\debug`: 2.354 GiB at build completion, 2.869 GiB after tests;
+- workspace `cargo test --workspace --locked`: exit 0 in 94.66 s;
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0 in 17.27 s;
+- `cargo check --profile debugging -p agent-session-grep-domain`: exit 0;
+- an external temporary Cargo project inherited `debuginfo=line-tables-only`.
+
+The tutorial cleanup scope removed 27 top-level items totaling 105.299 GiB, and
+every original path was verified absent. A follow-up audit found Recycle Bin
+metadata for only 21 of those items. Six large target/experiment directories
+were permanently removed outside the Recycle Bin: the old `target\debug`,
+`quick-local-v2` baseline and candidate targets, `full-baseline-v11-preflight`,
+`quick-local-v1`, and `full-baseline-v8-clippy`. The generated cleanup receipt's
+`moved-to-recycle-bin` label therefore overstates the outcome and must not be
+used as proof that all 27 were recoverable. Existing Recycle Bin entries were
+not emptied wholesale. Release/msrv root targets, Beta targets, g6 acceptance
+evidence and attribution-closeout were preserved.
+
+Defender real-time protection is enabled. The exact target path was added as an
+exclusion and verified, but the pre-existing exclusion list already contained
+`C:\`, so this action provides no additional scan coverage or guaranteed speed
+gain.

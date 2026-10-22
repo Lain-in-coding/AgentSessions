@@ -434,8 +434,8 @@ artifact identity prevents a formal start. Cargo JSON names artifacts from
 this invocation, and receipts pin those files; never pick a stale executable
 by scanning target directories or relaxing the official Beta validator.
 
-Runner state is stored in `run_root/campaign.json`; raw arm and process
-receipts remain immutable. Repeating `run` resumes matching verified state.
+Runner state is stored in a `campaign.json` receipt inside the declared run
+root; raw arm and process receipts remain immutable. Repeating `run` resumes matching verified state.
 An interrupted inflight attempt is preserved and does not silently restart.
 The runner prints actual completion and reasons. Compute-hour forecasts from
 pilot durations exclude dependency fetch, seed creation, qualification jobs,
@@ -685,3 +685,14 @@ The pass also fixed Cargo subcommand resolution: the pinned Cargo and Rustc bin
 directories are placed before rustup proxies so `cargo clippy` cannot silently
 select the default stable toolchain. The focused and broader runner checks
 passed 29/29, with Ruff, Mypy and whitespace checks passing.
+
+## Cargo profile rollout (2026-10-22)
+
+The measured development profile is now active through both a committed
+repository override and the local user-level Cargo config. Normal workspace
+builds use `line-tables-only` for workspace members and omit dependency debug
+information; `--profile debugging` restores full debugging.
+
+See [CARGO-PROFILE.md](./CARGO-PROFILE.md) for commands, validation and toolchain
+compatibility. The repository is pinned to Rust/Cargo 1.97.1 while the
+machine-wide default stable toolchain remains independently repaired.
