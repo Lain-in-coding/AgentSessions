@@ -4,7 +4,10 @@ use agent_session_grep_adapters_sqlite::{
     maintenance_queue::{QueueLock, SqliteMaintenanceQueue},
 };
 use agent_session_grep_domain::{IdKind, MessagePlacement, StableId};
-use agent_session_grep_ports::maintenance::{MaintenanceJob, MaintenanceQueue, MaintenanceState};
+use agent_session_grep_ports::{
+    PortError,
+    maintenance::{MaintenanceJob, MaintenanceQueue, MaintenanceState},
+};
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::{
@@ -89,9 +92,17 @@ impl Fixture {
             .to_owned()
     }
     fn queue(&self) -> SqliteMaintenanceQueue {
-        SqliteMaintenanceQueue::open_existing(self.root.path())
-            .unwrap()
-            .unwrap()
+        let deadline = Instant::now() + Duration::from_secs(90);
+        loop {
+            match SqliteMaintenanceQueue::open_existing(self.root.path()) {
+                Ok(Some(queue)) => return queue,
+                Ok(None) => panic!("maintenance queue disappeared"),
+                Err(PortError::WriterBusy(_)) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(40));
+                }
+                Err(error) => panic!("maintenance queue open failed: {error:?}"),
+            }
+        }
     }
     fn job(&self, id: &str) -> MaintenanceJob {
         self.queue().get(id).unwrap()
