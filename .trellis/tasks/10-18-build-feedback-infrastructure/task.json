@@ -33,10 +33,10 @@
     "scripts/evidence/build_feedback_retention.py",
     "scripts/evidence/test_build_feedback_retention.py"
   ],
-  "notes": "Bounded v2 infrastructure and first full-capacity bootstrap passed final ten-file review, Ruff/Mypy and277tests/665.248s. New initial-leaf protocol and exact protected retention approval validated; no actual run or native disposal. Current disk/quiet conditions refuse execution; keep in_progress, preserve existing caches and recent ignored bytecode, stop current checkpoint without nextphase planning.",
+  "notes": "Fast local decision completed 2026-10-22: combined line-tables-only + 3lane reduced final target allocation 45.24% with primary wall time +0.03% and warm feedback -8.88%; 24/24 job invocations exited 0. This is a local decision, not a five-pair confidence-bound or project-wide release claim.",
   "meta": {
     "plan_revision": "2026-10-19-bounded-trial-grill-q1-q5",
-    "implementation_state": "bounded-full-capacity-infrastructure-verified-local-protocol-ready-execution-refused",
+    "implementation_state": "local-quick-decision-complete",
     "source_repository": "Lain-in-coding/agent-session-grep",
     "formal_pairs_per_finalist": null,
     "max_finalists": 2,
@@ -45,7 +45,7 @@
     "baseline_allocated_bytes": 156436568120,
     "pilot_completed_valid_pairs": 0,
     "formal_completed_valid_pairs": 0,
-    "operational_blocker": "Latest read-only resource receipt38.211GiBfree below56GiB initial controlled probe and40GiBunreserved floor; other-window ASG preventsquiet. Initialleaf protocol uses a verified clean frozen worktree while oldbaseline recent ignored.pyc is preserved/rejected. Full currentinventory/memory/softreview/quiet required before execution. Nativefixture/capacity/Pilot/Formal0; no existingcachecleanup or profile/tooladoption.",
+    "operational_blocker": "",
     "implementation_branch": "chore/build-feedback-infrastructure-20261018",
     "tooling_validation": {
       "checkpoint": "final-v2-bounded-full-capacity-infrastructure-20261020",
@@ -540,6 +540,35 @@
       "independent_review": "Trellis check passed after3confirmed boundary fixes; no remaining confirmed code defects; final127-test aggregate passed after fixes",
       "checkpoint": "historical-v1-90cd908",
       "applies_to": "preserved v1 release-import implementation only; not the pending v2 aggregate"
+    },
+    "quick_local_decision": {
+      "status": "ok",
+      "completed_at": "2026-10-22",
+      "evidence_root": "C:\\AgentSessions\\.trellis\\.runtime\\build-feedback-infrastructure-20261018\\quick-local-v2-20261022",
+      "baseline_target_allocated_bytes": 8391745728,
+      "candidate_target_allocated_bytes": 4595418256,
+      "allocation_reduction_bytes": 3796327472,
+      "allocation_reduction_percent": 45.24,
+      "primary_baseline_ms": 411410.0,
+      "primary_candidate_ms": 411530.0,
+      "primary_delta_percent": 0.03,
+      "warm_baseline_ms": 253160.0,
+      "warm_candidate_ms": 230690.0,
+      "warm_delta_percent": -8.88,
+      "job_invocations": 24,
+      "nonzero_invocations": 0,
+      "decision": "adopt-candidate-for-local-trial",
+      "formal_claim": false
+    },
+    "runner_toolchain_path_fix": {
+      "files": [
+        "scripts/evidence/build_feedback_runner.py",
+        "scripts/evidence/test_build_feedback_runner.py"
+      ],
+      "focused_tests_passed": 29,
+      "ruff": "passed",
+      "mypy": "passed",
+      "whitespace": "passed"
     }
   }
 }

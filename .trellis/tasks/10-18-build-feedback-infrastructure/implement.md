@@ -512,3 +512,29 @@ seconds; Ruff and Mypy passed all 12 build-feedback Python files. Independent
 incremental review fixed physical-final/instantaneous reservation checks,
 qualification write accounting, coordinator seal/observation refusal and added
 the corresponding regressions.
+
+## Fast local decision checkpoint (2026-10-22)
+
+The owner redirected the final stage to a local decision with the shortest
+useful measurement path. The audit-grade leaf/full/five-pair lifecycle was not
+continued after it became clear that its process-tree and seal overhead dominated
+the compiler workload.
+
+A real local comparison completed at
+`C:\AgentSessions\.trellis\.runtime\build-feedback-infrastructure-20261018\quick-local-v2-20261022`:
+
+- baseline primary: 6/6 jobs succeeded, 411.41 s wall time;
+- candidate primary: 6/6 jobs succeeded, 411.53 s wall time (+0.03%);
+- candidate feedback-warm: 6/6 jobs succeeded, 230.69 s;
+- baseline feedback-warm: 6/6 jobs succeeded, 253.16 s (-8.88% candidate);
+- baseline final target allocation: 8,391,745,728 bytes;
+- candidate final target allocation: 4,595,418,256 bytes;
+- allocation reduction: 3,796,327,472 bytes (45.24%);
+- 24/24 recorded job invocations returned exit code 0.
+
+A real runner defect was fixed before this run: Cargo subcommands now resolve
+from the pinned Cargo/Rustc toolchain bin directories before rustup proxies.
+The focused and broader runner checks passed (29/29), Ruff, Mypy and whitespace
+checks passed. The local result supports trying the combined candidate on this
+machine; it is not a five-pair confidence-bound, formal or project-wide release
+claim.

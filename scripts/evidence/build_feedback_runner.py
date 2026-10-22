@@ -903,6 +903,21 @@ def job_command(protocol: dict, job: dict, target: Path) -> list[str]:
     return command
 
 
+def _prepend_path_directories(environment: dict[str, str], directories: list[str]) -> None:
+    entries: list[str] = []
+    seen: set[str] = set()
+    inherited = environment.get("PATH", "").split(os.pathsep)
+    for directory in [*directories, *inherited]:
+        if not directory:
+            continue
+        identity = os.path.normcase(os.path.normpath(directory))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        entries.append(directory)
+    environment["PATH"] = os.pathsep.join(entries)
+
+
 def tool_environment(protocol: dict, config: dict, *, feedback: bool = False) -> dict[str, str]:
     environment = {key: value for key, value in os.environ.items() if not key.upper().startswith(("CARGO_", "RUST", "SCCACHE_", "MBX_", "CCACHE_")) and key.upper() not in ("CI", "MAKEFLAGS", "MFLAGS", "CFLAGS", "CXXFLAGS", "CL", "_CL_", "LINK", "_LINK_", "CC", "CXX", "AR", "CARGO", "RUSTUP_TOOLCHAIN")}
     cargo_home = os.environ.get("CARGO_HOME")
@@ -924,7 +939,9 @@ def tool_environment(protocol: dict, config: dict, *, feedback: bool = False) ->
         _require(receipt["identity"] == protocol["toolchain"]["msvc"], "msvc_environment_identity_changed")
         environment.update(receipt["environment"])
     environment.update(CC=compiler, CXX=compiler, CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=linker)
-    environment["PATH"] = os.pathsep.join([str(Path(compiler).parent), str(Path(linker).parent), environment.get("PATH", "")])
+    _prepend_path_directories(environment, [str(Path(protocol["toolchain"]["cargo"]["path"]).parent),
+                                           str(Path(protocol["toolchain"]["rustc"]["path"]).parent),
+                                           str(Path(compiler).parent), str(Path(linker).parent)])
     tool = config["tool"]
     if tool["kind"] == "sccache":
         environment.update(RUSTC_WRAPPER=tool["path"], SCCACHE_DIR=tool["store"], SCCACHE_CACHE_SIZE=str((1 << 63) - 1), SCCACHE_LOCAL_RW_MODE=tool["local_rw_mode"], SCCACHE_SERVER_PORT=str(tool["server_port"]), SCCACHE_IDLE_TIMEOUT="0")
@@ -2173,8 +2190,8 @@ def release_environment(protocol: dict, arm_record: dict) -> dict[str, str]:
                    if (not key.upper().startswith(("CARGO_", "RUST", "SCCACHE_", "MBX_", "CCACHE_")) or key.upper() in allowed_cargo)
                    and key.upper() not in forbidden_names
                    and not key.upper().startswith(("LIBSQLITE3", "SQLITE", "SQLCIPHER", "PKG_CONFIG", "CC_", "CXX_", "AR_", "CFLAGS_", "CXXFLAGS_"))}
-    environment["PATH"] = os.pathsep.join([str(Path(protocol["toolchain"]["cargo"]["path"]).parent),
-                                           str(Path(protocol["toolchain"]["rustc"]["path"]).parent), environment.get("PATH", "")])
+    _prepend_path_directories(environment, [str(Path(protocol["toolchain"]["cargo"]["path"]).parent),
+                                           str(Path(protocol["toolchain"]["rustc"]["path"]).parent)])
     environment.update(CARGO_TARGET_DIR=str(Path(arm_record["target_root"]) / "qualification" / "release"),
                        CARGO_BUILD_TARGET=protocol["toolchain"]["target"], CARGO_BUILD_JOBS="2", CARGO_NET_OFFLINE="true",
                        TEMP=str(Path(entry["release_suite_root"]) / "scratch"), TMP=str(Path(entry["release_suite_root"]) / "scratch"),

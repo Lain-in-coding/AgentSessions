@@ -658,3 +658,30 @@ implemented by the corresponding inventory/runner suites. A synthetic pass
 is not a real workload pilot, formal campaign, hosted release check or tool
 adoption. Parent review owns actual inventory, operational admission,
 optional-feature/release qualification and the final scoped commit.
+
+## Fast local decision result (2026-10-22)
+
+The final local decision pass intentionally used a shorter workload than the
+five-pair audit lifecycle. It retained the real six-job command set, pinned
+Rust 1.97.1/MSVC identity, isolated targets, the same source commit/tree and a
+direct real-process wall-clock measurement. It did not claim a formal seal,
+five-pair confidence bound or shared-default adoption.
+
+The combined candidate (`debug=line-tables-only`, `incremental=on`,
+`layout=3lane`, native Cargo) produced:
+
+| Measurement | Baseline | Candidate | Candidate delta |
+| --- | ---: | ---: | ---: |
+| Primary six-job wall time | 411.41 s | 411.53 s | +0.03% |
+| Warm six-job wall time | 253.16 s | 230.69 s | -8.88% |
+| Final target allocation | 8,391,745,728 B | 4,595,418,256 B | -45.24% |
+
+All 24 job invocations in the four measured phases returned exit code 0. The
+local recommendation is therefore to trial the combined candidate on this
+machine. The result does not isolate the two factors, cover the edit phase or
+replace a five-pair project-level qualification.
+
+The pass also fixed Cargo subcommand resolution: the pinned Cargo and Rustc bin
+directories are placed before rustup proxies so `cargo clippy` cannot silently
+select the default stable toolchain. The focused and broader runner checks
+passed 29/29, with Ruff, Mypy and whitespace checks passing.

@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -377,6 +378,33 @@ class ProtocolTests(unittest.TestCase):
             self.assertNotIn("SCCACHE_BUCKET", env)
             self.assertNotIn("CARGO_PROFILE_RELEASE_DEBUG", env)
             self.assertEqual(RUNNER.tool_environment(protocol, configuration, feedback=True)["CARGO_INCREMENTAL"], "1")
+
+    def test_tool_environment_prefers_pinned_cargo_subcommands_over_rustup_proxy(self):
+        protocol = self.protocol()
+        cargo_bin = self.root / "pinned-cargo" / "bin"
+        rustc_bin = self.root / "pinned-rustc" / "bin"
+        cargo_bin.mkdir(parents=True)
+        rustc_bin.mkdir(parents=True)
+        cargo = cargo_bin / "cargo.exe"
+        rustc = rustc_bin / "rustc.exe"
+        pinned_clippy = cargo_bin / "cargo-clippy.exe"
+        proxy_dir = self.root / "rustup-proxy"
+        proxy_dir.mkdir()
+        proxy_clippy = proxy_dir / "cargo-clippy.exe"
+        for path in (cargo, rustc, pinned_clippy, proxy_clippy):
+            path.write_bytes(b"synthetic executable")
+        protocol["toolchain"]["cargo"]["path"] = str(cargo)
+        protocol["toolchain"]["rustc"]["path"] = str(rustc)
+        inherited = os.pathsep.join([str(proxy_dir), str(cargo_bin), str(proxy_dir)])
+        with patch.dict(os.environ, {"CARGO_HOME": str(self.root), "PATH": inherited}):
+            environment = RUNNER.tool_environment(protocol, protocol["configs"]["baseline"])
+        entries = environment["PATH"].split(os.pathsep)
+        identities = [os.path.normcase(os.path.normpath(entry)) for entry in entries]
+        self.assertEqual(entries[:3], [str(cargo_bin), str(rustc_bin), str(self.root)])
+        self.assertEqual(identities.count(os.path.normcase(os.path.normpath(str(cargo_bin)))), 1)
+        self.assertLess(entries.index(str(cargo_bin)), entries.index(str(proxy_dir)))
+        self.assertLess(entries.index(str(rustc_bin)), entries.index(str(proxy_dir)))
+        self.assertEqual(Path(shutil.which("cargo-clippy", path=environment["PATH"])).resolve(), pinned_clippy.resolve())
 
     def test_duplicate_json_and_proxy_toolchain_rejected(self):
         path = self.root / "duplicates.json"
