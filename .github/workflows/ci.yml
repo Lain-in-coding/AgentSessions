@@ -100,7 +100,13 @@ jobs:
       # pure-function suite. The installer job re-runs the regression harness
       # with a release binary present, which unlocks its binary-backed cases.
       - name: Evidence harness tests
-        run: python -m unittest discover -s scripts/evidence -p "test_*.py" -v
+        env:
+          TEMP: ${{ runner.temp }}/asg-evidence-temp
+          TMP: ${{ runner.temp }}/asg-evidence-temp
+          TMPDIR: ${{ runner.temp }}/asg-evidence-temp
+        run: |
+          python -c "from pathlib import Path; import os; Path(os.environ['TEMP']).mkdir(parents=True, exist_ok=True)"
+          python -m unittest discover -s scripts/evidence -p "test_*.py" -v
 
   semantic-candle:
     name: semantic-candle (${{ matrix.os }})
